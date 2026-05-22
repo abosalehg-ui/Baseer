@@ -15,10 +15,10 @@ jobs:
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -28,18 +28,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install ruff==0.6.9 black==24.8.0
 
+      - name: Print versions
+        run: |
+          python --version
+          ruff --version
+          black --version
+
       - name: Run ruff
-        run: ruff check app tests
+        run: ruff check app tests scripts
 
       - name: Check black formatting
-        run: black --check app tests
+        run: black --check app tests scripts
 
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
     needs: lint
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install FFmpeg
         run: |
@@ -47,7 +53,7 @@ jobs:
           sudo apt-get install -y ffmpeg
 
       - name: Setup Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
