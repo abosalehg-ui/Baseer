@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 from app import __app_name__, __version__
 from app.ui.annotator_view import AnnotatorView
 from app.ui.library_view import LibraryView
+from app.ui.trainer_view import TrainerView
 
 
 # ============================================
@@ -76,10 +77,7 @@ class MainWindow(QMainWindow):
 
         tabs.addTab(LibraryView(parent=self), "المكتبة")
         tabs.addTab(AnnotatorView(parent=self), "التصنيف")
-        tabs.addTab(
-            PlaceholderTab("التدريب", "fine-tuning موديل YOLO على البيانات المُصنَّفة."),
-            "التدريب",
-        )
+        tabs.addTab(TrainerView(parent=self), "التدريب")
         tabs.addTab(
             PlaceholderTab("التحليل", "تشغيل الموديل واستخراج المخالفات من المقاطع."),
             "التحليل",
