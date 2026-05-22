@@ -142,6 +142,57 @@ class AnalyzerService:
             for r in rows
         ]
 
+    def extract_violations(self, video_id: int, *, fps: float | None = None) -> int:
+        """يُشغّل محرك القواعد على كشوفات مقطع ويخزّن المخالفات في DB.
+
+        يستدعي بعد `analyze_video()` لتوليد جدول `violations` للمقطع.
+        يُرجع عدد المخالفات المخزَّنة.
+        """
+        from app.core.rules import load_zones_from_db, run_detectors
+
+        detections = self.detections_for_video(video_id)
+        if not detections:
+            return 0
+        actual_fps = fps if fps is not None else self._fps_for_video(video_id)
+        zones = load_zones_from_db(video_id, self._db)
+        candidates = run_detectors(detections, zones, actual_fps)
+
+        self._db.execute("DELETE FROM violations WHERE video_id = ?", (video_id,))
+        rows = [
+            (
+                video_id,
+                c.violation_type.value,
+                c.start_ms,
+                c.end_ms,
+                c.confidence,
+                c.track_id,
+                json.dumps(c.evidence_frames),
+                c.notes,
+            )
+            for c in candidates
+        ]
+        if rows:
+            self._db.executemany(
+                """
+                INSERT INTO violations
+                    (video_id, violation_type, start_ms, end_ms, confidence,
+                     track_id, evidence_frames, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+
+        self._db.execute(
+            "UPDATE videos SET status = ? WHERE id = ?",
+            (VideoStatus.ANALYZED.value, video_id),
+        )
+        logger.info("تم استخراج %d مخالفة من المقطع %d", len(rows), video_id)
+        return len(rows)
+
+    def _fps_for_video(self, video_id: int) -> float:
+        row = self._db.fetch_one("SELECT fps FROM videos WHERE id = ?", (video_id,))
+        return float(row[0]) if row and row[0] else 30.0
+
     # ============================================
     # تخزين داخلي
     # ============================================
