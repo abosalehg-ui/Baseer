@@ -47,10 +47,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install FFmpeg
+      - name: Install system libs (FFmpeg + EGL for PyQt6 headless)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg libegl1 libgl1
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
