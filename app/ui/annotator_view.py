@@ -102,6 +102,11 @@ class AnnotatorView(QWidget):
         refresh_btn = QPushButton("تحديث", self)
         refresh_btn.clicked.connect(self.refresh)
         actions.addWidget(refresh_btn)
+
+        prepare_btn = QPushButton("تجهيز Dataset (YOLOv8)", self)
+        prepare_btn.clicked.connect(self._on_prepare_dataset)
+        actions.addWidget(prepare_btn)
+
         actions.addStretch()
         root.addLayout(actions)
 
@@ -235,6 +240,37 @@ class AnnotatorView(QWidget):
 
     def _on_open_cvat(self) -> None:
         webbrowser.open(self._annotator.cvat_url)
+
+    def _on_prepare_dataset(self) -> None:
+        """يُجهّز dataset YOLOv8 من مجلد reviewed."""
+        from app.core.dataset import DatasetService
+
+        source = QFileDialog.getExistingDirectory(
+            self,
+            "اختر مجلد التصنيفات المُراجَعة (CVAT YOLO export)",
+            str(self._settings.data_dir / "annotations" / "reviewed"),
+        )
+        if not source:
+            return
+        output = self._settings.data_dir / "dataset"
+        try:
+            report = DatasetService().prepare(source, output, overwrite=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("فشل تجهيز الـ dataset")
+            QMessageBox.critical(self, "فشل التجهيز", str(exc))
+            return
+
+        msg_lines = [
+            f"إجمالي العينات: {report.total_samples}",
+            f"train: {report.train_count}  •  val: {report.val_count}  •  test: {report.test_count}",
+            f"\ndataset.yaml: {output / 'dataset.yaml'}",
+        ]
+        if report.issues:
+            msg_lines.append("\nتحذيرات:")
+            msg_lines.extend(f"• {issue}" for issue in report.issues)
+
+        QMessageBox.information(self, "تم تجهيز الـ Dataset", "\n".join(msg_lines))
+        self._status_label.setText(f"جُهّز dataset في {output}")
 
     def _on_choose_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
