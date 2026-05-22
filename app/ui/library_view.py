@@ -225,7 +225,36 @@ class LibraryView(QWidget):
         )
         self._import_thread = None
         self._import_worker = None
+
+        # تشخيص واضح لو كل الملفات فشلت
+        if report.failed and not report.imported and not report.duplicates:
+            self._show_failure_diagnosis(report)
+
         self.refresh()
+
+    def _show_failure_diagnosis(self, report: ImportReport) -> None:
+        """يعرض رسالة تشخيص مفصّلة لو الاستيراد فشل بالكامل."""
+        first_error = report.failed[0][1] if report.failed else ""
+        is_ffmpeg = "ffprobe" in first_error.lower() or "ffmpeg" in first_error.lower()
+
+        if is_ffmpeg:
+            QMessageBox.critical(
+                self,
+                "FFmpeg غير مثبَّت",
+                "<b>FFmpeg غير موجود في PATH.</b><br><br>"
+                "بَصير يحتاج <code>ffmpeg</code> و <code>ffprobe</code> لقراءة بيانات "
+                "المقاطع وتوليد الـ thumbnails.<br><br>"
+                "<b>طريقة التثبيت السريعة (PowerShell):</b><br>"
+                "<code>winget install --id Gyan.FFmpeg</code><br><br>"
+                "بعد التثبيت، أغلق التطبيق وأعد فتح PowerShell ثم شغّله من جديد.<br><br>"
+                "تفاصيل أول خطأ:<br><i>" + first_error[:200] + "</i>",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "فشلت كل عمليات الاستيراد",
+                f"فشل {len(report.failed)} ملف. أول خطأ:\n\n{first_error[:400]}",
+            )
 
     def _on_import_failed(self, message: str) -> None:
         self._progress.setVisible(False)

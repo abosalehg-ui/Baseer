@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 from logging.handlers import RotatingFileHandler
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from app import __app_name_en__
 from app.config import ensure_directories, get_settings
@@ -55,9 +56,29 @@ def main() -> int:
     app.setApplicationName(__app_name_en__)
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
+    _warn_if_ffmpeg_missing(logger)
+
     window = MainWindow()
     window.show()
     return app.exec()
+
+
+def _warn_if_ffmpeg_missing(logger: logging.Logger) -> None:
+    """يحذّر المستخدم عند بدء التطبيق لو ffmpeg/ffprobe غير موجود."""
+    missing = [name for name in ("ffmpeg", "ffprobe") if shutil.which(name) is None]
+    if not missing:
+        return
+    logger.warning("FFmpeg غير موجود في PATH: %s", missing)
+    QMessageBox.warning(
+        None,
+        "FFmpeg غير مثبَّت",
+        "<b>تحذير:</b> لم يُعثر على "
+        f"<code>{' و '.join(missing)}</code> في PATH.<br><br>"
+        "استيراد الفيديوهات وتوليد الـ thumbnails سيفشل بدونه.<br><br>"
+        "<b>طريقة التثبيت السريعة (PowerShell):</b><br>"
+        "<code>winget install --id Gyan.FFmpeg</code><br><br>"
+        "بعد التثبيت، أعد فتح PowerShell وشغّل التطبيق من جديد.",
+    )
 
 
 if __name__ == "__main__":
