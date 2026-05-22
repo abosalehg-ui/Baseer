@@ -148,16 +148,31 @@ class AnalyzerService:
         يستدعي بعد `analyze_video()` لتوليد جدول `violations` للمقطع.
         يُرجع عدد المخالفات المخزَّنة.
         """
-        from app.core.rules import load_zones_from_db, run_detectors
+        from app.core.calibration import CalibrationService
+        from app.core.detectors import FollowingDistanceDetector, HighBeamDetector
+        from app.core.rules import all_default_detectors, load_zones_from_db, run_detectors
 
         detections = self.detections_for_video(video_id)
         if not detections:
             return 0
         actual_fps = fps if fps is not None else self._fps_for_video(video_id)
         zones = load_zones_from_db(video_id, self._db)
-        candidates = run_detectors(detections, zones, actual_fps)
 
-        self._db.execute("DELETE FROM violations WHERE video_id = ?", (video_id,))
+        # نُضيف الكواشف التي تحتاج معايرة أو ملف فيديو فقط عند توفرها
+        detectors = all_default_detectors()
+        calibration = CalibrationService(db=self._db).get_calibration(video_id)
+        if calibration is not None and calibration.meters_per_px > 0:
+            detectors.append(FollowingDistanceDetector(meters_per_px=calibration.meters_per_px))
+        video_filepath = self._video_filepath(video_id)
+        if video_filepath is not None and Path(video_filepath).exists():
+            detectors.append(HighBeamDetector(video_path=video_filepath))
+
+        candidates = run_detectors(detections, zones, actual_fps, detectors=detectors)
+
+        # نحذف فقط المخالفات التلقائية حتى تبقى المخالفات اليدوية محفوظة بعد إعادة التحليل
+        self._db.execute(
+            "DELETE FROM violations WHERE video_id = ? AND source = 'auto'", (video_id,)
+        )
         rows = [
             (
                 video_id,
@@ -168,6 +183,7 @@ class AnalyzerService:
                 c.track_id,
                 json.dumps(c.evidence_frames),
                 c.notes,
+                "auto",
             )
             for c in candidates
         ]
@@ -176,8 +192,8 @@ class AnalyzerService:
                 """
                 INSERT INTO violations
                     (video_id, violation_type, start_ms, end_ms, confidence,
-                     track_id, evidence_frames, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     track_id, evidence_frames, notes, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -192,6 +208,10 @@ class AnalyzerService:
     def _fps_for_video(self, video_id: int) -> float:
         row = self._db.fetch_one("SELECT fps FROM videos WHERE id = ?", (video_id,))
         return float(row[0]) if row and row[0] else 30.0
+
+    def _video_filepath(self, video_id: int) -> str | None:
+        row = self._db.fetch_one("SELECT filepath FROM videos WHERE id = ?", (video_id,))
+        return str(row[0]) if row and row[0] else None
 
     # ============================================
     # تخزين داخلي

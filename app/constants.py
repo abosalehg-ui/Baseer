@@ -39,6 +39,10 @@ class ViolationType(str, Enum):
     ILLEGAL_PARKING = "illegal_parking"
     ILLEGAL_OVERTAKING = "illegal_overtaking"
     SPEEDING = "speeding"
+    LANE_KEEPING = "lane_keeping"
+    HIGH_BEAM_MISUSE = "high_beam_misuse"
+    UNSAFE_FOLLOWING = "unsafe_following"
+    MANUAL_OTHER = "manual_other"
 
 
 VIOLATION_ARABIC_NAMES: Final[dict[ViolationType, str]] = {
@@ -48,6 +52,26 @@ VIOLATION_ARABIC_NAMES: Final[dict[ViolationType, str]] = {
     ViolationType.ILLEGAL_PARKING: "الوقوف الخاطئ",
     ViolationType.ILLEGAL_OVERTAKING: "التجاوز الخاطئ",
     ViolationType.SPEEDING: "السرعة الزائدة",
+    ViolationType.LANE_KEEPING: "عدم الالتزام بالمسار",
+    ViolationType.HIGH_BEAM_MISUSE: "إساءة استخدام أنوار التلاقي",
+    ViolationType.UNSAFE_FOLLOWING: "عدم ترك مسافة آمنة",
+    ViolationType.MANUAL_OTHER: "مخالفة يدوية أخرى",
+}
+
+
+# ============================================
+# مصدر المخالفة (تلقائي أو يدوي)
+# ============================================
+class ViolationSource(str, Enum):
+    """مصدر إنشاء المخالفة."""
+
+    AUTO = "auto"
+    MANUAL = "manual"
+
+
+VIOLATION_SOURCE_ARABIC_NAMES: Final[dict[ViolationSource, str]] = {
+    ViolationSource.AUTO: "تلقائي",
+    ViolationSource.MANUAL: "يدوي",
 }
 
 

@@ -95,6 +95,10 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_viol_type ON violations(violation_type);",
     "CREATE INDEX IF NOT EXISTS idx_viol_video ON violations(video_id);",
+    # ترحيل: عمود مصدر المخالفة (تلقائي/يدوي) — يحافظ على المخالفات اليدوية عند إعادة التحليل
+    "ALTER TABLE violations ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'auto';",
+    "ALTER TABLE violations ADD COLUMN IF NOT EXISTS manual_user VARCHAR;",
+    "CREATE INDEX IF NOT EXISTS idx_viol_source ON violations(source);",
     # المعايرات
     """
     CREATE TABLE IF NOT EXISTS calibrations (

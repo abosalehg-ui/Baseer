@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -21,6 +20,7 @@ from PyQt6.QtWidgets import (
 from app.config import get_settings
 from app.constants import VIOLATION_ARABIC_NAMES, ViolationType
 from app.core.analyzer import AnalyzerService
+from app.ui.dialogs import ManualViolationDialog
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,20 @@ class AnalysisView(QWidget):
         bar.addWidget(refresh_btn)
 
         bar.addStretch()
+
+        # أزرار التدخل البشري (يدوي)
+        self._add_manual_btn = QPushButton("➕ إضافة مخالفة يدوية", self)
+        self._add_manual_btn.clicked.connect(self._on_add_manual)
+        bar.addWidget(self._add_manual_btn)
+
+        self._edit_btn = QPushButton("✏️ تعديل", self)
+        self._edit_btn.clicked.connect(self._on_edit_violation)
+        bar.addWidget(self._edit_btn)
+
+        self._delete_btn = QPushButton("🗑️ حذف", self)
+        self._delete_btn.clicked.connect(self._on_delete_violation)
+        bar.addWidget(self._delete_btn)
+
         root.addLayout(bar)
 
         # شريط تقدم
@@ -111,13 +125,27 @@ class AnalysisView(QWidget):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         root.addWidget(self._table, stretch=2)
 
-        # جدول ملخّص المخالفات حسب النوع
-        self._summary_label = QLabel("ملخّص المخالفات حسب النوع:", self)
-        root.addWidget(self._summary_label)
-        self._summary = QTextEdit(self)
-        self._summary.setReadOnly(True)
-        self._summary.setMaximumHeight(150)
-        root.addWidget(self._summary, stretch=1)
+        # جدول المخالفات الفردية (قابل للتعديل/الحذف)
+        self._violations_label = QLabel("المخالفات المُسجّلة:", self)
+        root.addWidget(self._violations_label)
+        self._violations_table = QTableWidget(self)
+        self._violations_table.setColumnCount(8)
+        self._violations_table.setHorizontalHeaderLabels(
+            [
+                "المعرّف",
+                "المقطع",
+                "النوع",
+                "البداية (ms)",
+                "النهاية (ms)",
+                "اللوحة",
+                "المصدر",
+                "الملاحظات",
+            ]
+        )
+        self._violations_table.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._violations_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._violations_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        root.addWidget(self._violations_table, stretch=2)
 
     # ============================================
     # عرض
@@ -137,21 +165,27 @@ class AnalysisView(QWidget):
         self._refresh_summary()
 
     def _refresh_summary(self) -> None:
+        """يُحدّث جدول المخالفات الفردية."""
         rows = self._service._db.fetch_all(  # noqa: SLF001
-            "SELECT violation_type, COUNT(*) FROM violations "
-            "GROUP BY violation_type ORDER BY COUNT(*) DESC"
+            "SELECT vi.id, v.filename, vi.violation_type, vi.start_ms, vi.end_ms, "
+            "COALESCE(vi.license_plate, ''), COALESCE(vi.source, 'auto'), COALESCE(vi.notes, '') "
+            "FROM violations vi LEFT JOIN videos v ON v.id = vi.video_id "
+            "ORDER BY vi.id DESC LIMIT 500"
         )
-        if not rows:
-            self._summary.setText("لا توجد مخالفات مُستخرَجة بعد.")
-            return
-        lines: list[str] = ["<b>مخالفة | عدد</b>"]
-        for vtype, count in rows:
-            try:
-                arabic = VIOLATION_ARABIC_NAMES[ViolationType(vtype)]
-            except (KeyError, ValueError):
-                arabic = str(vtype)
-            lines.append(f"{arabic}: {count}")
-        self._summary.setHtml("<br>".join(lines))
+        self._violations_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            for c, val in enumerate(row):
+                # نترجم نوع المخالفة إلى عربي
+                display = val
+                if c == 2:
+                    try:
+                        display = VIOLATION_ARABIC_NAMES[ViolationType(str(val))]
+                    except (KeyError, ValueError):
+                        display = str(val)
+                elif c == 6:
+                    display = "يدوي" if str(val) == "manual" else "تلقائي"
+                self._violations_table.setItem(r, c, QTableWidgetItem(str(display)))
+        self._violations_table.resizeColumnsToContents()
 
     # ============================================
     # تشغيل
@@ -208,3 +242,80 @@ class AnalysisView(QWidget):
         self._status.setText("فشل الاستخراج")
         QMessageBox.critical(self, "فشل", message)
         self._worker = None
+
+    # ============================================
+    # التدخل البشري — إضافة/تعديل/حذف يدوي
+    # ============================================
+    def _load_videos_for_dialog(self) -> list[tuple[int, str]]:
+        rows = self._service._db.fetch_all(  # noqa: SLF001
+            "SELECT id, filename FROM videos ORDER BY id"
+        )
+        return [(int(r[0]), str(r[1])) for r in rows]
+
+    def _on_add_manual(self) -> None:
+        videos = self._load_videos_for_dialog()
+        if not videos:
+            QMessageBox.information(self, "لا توجد مقاطع", "يجب استيراد مقطع واحد على الأقل.")
+            return
+        dlg = ManualViolationDialog(
+            videos=videos, parent=self, db=self._service._db  # noqa: SLF001
+        )
+        if dlg.exec() == ManualViolationDialog.DialogCode.Accepted:
+            self._status.setText("تمت إضافة مخالفة يدوية")
+            self.refresh()
+
+    def _selected_violation_id(self) -> int | None:
+        selection = (
+            self._violations_table.selectionModel().selectedRows()
+            if self._violations_table.selectionModel()
+            else []
+        )
+        if not selection:
+            QMessageBox.information(self, "اختر مخالفة", "حدد مخالفة واحدة من الجدول.")
+            return None
+        row = selection[0].row()
+        return int(self._violations_table.item(row, 0).text())
+
+    def _on_edit_violation(self) -> None:
+        viol_id = self._selected_violation_id()
+        if viol_id is None:
+            return
+        row = self._service._db.fetch_one(  # noqa: SLF001
+            "SELECT id, video_id, violation_type, start_ms, end_ms, "
+            "license_plate, notes FROM violations WHERE id = ?",
+            (viol_id,),
+        )
+        if row is None:
+            QMessageBox.warning(self, "غير موجودة", "المخالفة المختارة غير موجودة.")
+            return
+        existing = {
+            "id": int(row[0]),
+            "video_id": int(row[1]),
+            "violation_type": str(row[2]),
+            "start_ms": int(row[3] or 0),
+            "end_ms": int(row[4] or 0),
+            "license_plate": row[5],
+            "notes": row[6],
+        }
+        videos = self._load_videos_for_dialog()
+        dlg = ManualViolationDialog(
+            videos=videos, parent=self, existing=existing, db=self._service._db  # noqa: SLF001
+        )
+        if dlg.exec() == ManualViolationDialog.DialogCode.Accepted:
+            self._status.setText(f"تم تعديل المخالفة #{viol_id}")
+            self.refresh()
+
+    def _on_delete_violation(self) -> None:
+        viol_id = self._selected_violation_id()
+        if viol_id is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "تأكيد الحذف",
+            f"هل تريد حذف المخالفة #{viol_id}؟ لا يمكن التراجع.",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        self._service._db.execute("DELETE FROM violations WHERE id = ?", (viol_id,))  # noqa: SLF001
+        self._status.setText(f"تم حذف المخالفة #{viol_id}")
+        self.refresh()

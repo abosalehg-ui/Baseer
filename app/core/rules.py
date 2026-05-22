@@ -513,13 +513,16 @@ class SpeedingDetector(BaseViolationDetector):
 # الـ pipeline الرئيسي
 # ============================================
 def all_default_detectors() -> list[BaseViolationDetector]:
-    """يُرجع كل الكواشف الافتراضية (بدون speeding — يحتاج معايرة)."""
+    """يُرجع كل الكواشف الافتراضية (بدون speeding/high_beam — يحتاجان معايرة/فيديو)."""
+    from app.core.detectors import LaneKeepingDetector
+
     return [
         RedLightDetector(),
         WrongDirectionDetector(),
         NoHelmetDetector(),
         IllegalParkingDetector(),
         IllegalOvertakingDetector(),
+        LaneKeepingDetector(),
     ]
 
 
