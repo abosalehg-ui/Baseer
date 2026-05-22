@@ -1,0 +1,25 @@
+# تبعيات الـ CI فقط — مجموعة فرعية خفيفة من requirements.txt
+# (لا GPU، لا paddlepaddle، لا ultralytics — تُختبر محلياً)
+
+# قاعدة البيانات
+duckdb>=1.1.0
+
+# معالجة الفيديو والصور
+Pillow>=10.4.0
+imagehash>=4.3.0
+ffmpeg-python>=0.2.0
+scenedetect>=0.6.4
+
+# الإعدادات
+python-dotenv>=1.0.0
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+
+# الواجهة
+PyQt6>=6.7.0
+pyqtgraph>=0.13.0
+
+# الاختبارات
+pytest>=8.3.0
+pytest-qt>=4.4.0
+pytest-cov>=5.0.0

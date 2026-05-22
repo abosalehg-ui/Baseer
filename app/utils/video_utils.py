@@ -91,6 +91,74 @@ def _parse_recorded_at(tags: dict) -> datetime | None:
     return None
 
 
+def _require_ffmpeg() -> str:
+    """يتحقق من وجود ffmpeg ويعيد مساره."""
+    path = shutil.which("ffmpeg")
+    if path is None:
+        raise FFmpegNotFoundError("ffmpeg غير موجود في PATH — ثبّت FFmpeg أولاً.")
+    return path
+
+
+def generate_thumbnail(
+    video_path: Path | str,
+    output_path: Path | str,
+    *,
+    timestamp_sec: float = 1.0,
+    width: int = 320,
+) -> Path:
+    """يولّد thumbnail JPEG من المقطع عند توقيت محدد."""
+    ffmpeg = _require_ffmpeg()
+    src = Path(video_path)
+    if not src.exists():
+        raise FileNotFoundError(f"الملف غير موجود: {src}")
+    dst = Path(output_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-ss",
+        f"{timestamp_sec:.3f}",
+        "-i",
+        str(src),
+        "-vframes",
+        "1",
+        "-vf",
+        f"scale={width}:-2",
+        "-q:v",
+        "3",
+        str(dst),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0 or not dst.exists():
+        raise RuntimeError(f"فشل توليد thumbnail: {result.stderr.strip()[:200]}")
+    return dst
+
+
+def detect_scenes(
+    video_path: Path | str,
+    *,
+    threshold: float = 27.0,
+    min_scene_len_frames: int = 30,
+) -> list[tuple[int, int]]:
+    """يكتشف حدود المشاهد، يعيد قائمة (start_ms, end_ms)."""
+    try:
+        from scenedetect import ContentDetector, SceneManager, open_video
+    except ImportError as exc:
+        raise RuntimeError("يحتاج scenedetect — ثبّت requirements.txt") from exc
+
+    video = open_video(str(video_path))
+    manager = SceneManager()
+    manager.add_detector(ContentDetector(threshold=threshold, min_scene_len=min_scene_len_frames))
+    manager.detect_scenes(video=video, show_progress=False)
+    scene_list = manager.get_scene_list()
+
+    return [
+        (int(start.get_seconds() * 1000), int(end.get_seconds() * 1000))
+        for start, end in scene_list
+    ]
+
+
 def extract_metadata(filepath: Path | str) -> VideoMetadata:
     """يستخرج البيانات الوصفية للمقطع."""
     path = Path(filepath)
