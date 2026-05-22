@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app import __app_name__, __version__
+from app.ui.annotator_view import AnnotatorView
 from app.ui.library_view import LibraryView
 
 
@@ -74,10 +75,7 @@ class MainWindow(QMainWindow):
         tabs.setTabPosition(QTabWidget.TabPosition.North)
 
         tabs.addTab(LibraryView(parent=self), "المكتبة")
-        tabs.addTab(
-            PlaceholderTab("التصنيف", "التصنيف اليدوي المدعوم بـ pseudo-labeling عبر CVAT."),
-            "التصنيف",
-        )
+        tabs.addTab(AnnotatorView(parent=self), "التصنيف")
         tabs.addTab(
             PlaceholderTab("التدريب", "fine-tuning موديل YOLO على البيانات المُصنَّفة."),
             "التدريب",
