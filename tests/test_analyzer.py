@@ -154,6 +154,58 @@ def test_detections_grouped_by_frame() -> None:
     assert len(groups[5]) == 1
 
 
+def test_extract_violations_runs_rules_and_stores_to_db(
+    tmp_db: Database, seeded_video: int, tmp_path: Path
+) -> None:
+    """يتأكد أن extract_violations يستخرج المخالفات ويخزّنها."""
+    from app.core.rules import Zone
+
+    # نزرع كشوفات + zone stop_line + إشارة حمراء
+    detections = [
+        Detection(0, 0, "vehicle", 0.9, (40, 0, 60, 10), track_id=1),
+        Detection(1, 33, "vehicle", 0.9, (40, 40, 60, 50), track_id=1),
+        Detection(2, 66, "vehicle", 0.9, (40, 60, 60, 70), track_id=1),
+        Detection(2, 66, "traffic_light_red", 0.95, (200, 0, 220, 20), track_id=99),
+    ]
+    service = AnalyzerService(db=tmp_db, inference_fn=_fake_inference_factory(detections))
+    service.analyze_video(seeded_video, AnalysisConfig(model_path=tmp_path / "x.pt"))
+
+    # أضف zone للـ stop_line
+    import json as _json
+
+    tmp_db.execute(
+        "INSERT INTO zones (video_id, zone_type, polygon) VALUES (?, ?, ?)",
+        (seeded_video, "stop_line", _json.dumps([[0, 50], [200, 50]])),
+    )
+
+    count = service.extract_violations(seeded_video, fps=30.0)
+    assert count == 1
+
+    rows = tmp_db.fetch_all(
+        "SELECT violation_type FROM violations WHERE video_id = ?", (seeded_video,)
+    )
+    assert rows[0][0] == "red_light_running"
+
+    # حالة المقطع تحدّثت
+    status = tmp_db.fetch_one("SELECT status FROM videos WHERE id = ?", (seeded_video,))
+    assert status[0] == "analyzed"
+
+
+def test_extract_violations_returns_zero_for_video_without_detections(
+    tmp_db: Database, tmp_path: Path
+) -> None:
+    video = tmp_path / "empty.mp4"
+    video.write_bytes(b"x")
+    tmp_db.execute(
+        "INSERT INTO videos (filepath, filename, status) VALUES (?, ?, ?)",
+        (str(video), "empty.mp4", "imported"),
+    )
+    row = tmp_db.fetch_one("SELECT id FROM videos WHERE filepath = ?", (str(video),))
+    assert row is not None
+    service = AnalyzerService(db=tmp_db)
+    assert service.extract_violations(int(row[0])) == 0
+
+
 def test_detections_to_json_is_valid_json() -> None:
     import json
 

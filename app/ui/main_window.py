@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app import __app_name__, __version__
+from app.ui.analysis_view import AnalysisView
 from app.ui.annotator_view import AnnotatorView
 from app.ui.library_view import LibraryView
 from app.ui.trainer_view import TrainerView
@@ -78,10 +79,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(LibraryView(parent=self), "المكتبة")
         tabs.addTab(AnnotatorView(parent=self), "التصنيف")
         tabs.addTab(TrainerView(parent=self), "التدريب")
-        tabs.addTab(
-            PlaceholderTab("التحليل", "تشغيل الموديل واستخراج المخالفات من المقاطع."),
-            "التحليل",
-        )
+        tabs.addTab(AnalysisView(parent=self), "التحليل")
         tabs.addTab(
             PlaceholderTab("الداشبورد", "الإحصاءات والرسوم البيانية وتصدير الدراسات."),
             "الداشبورد",
