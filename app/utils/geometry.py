@@ -140,3 +140,50 @@ def is_stationary(points: list[Point], threshold_px: float = 5.0) -> bool:
     cx = sum(p[0] for p in points) / len(points)
     cy = sum(p[1] for p in points) / len(points)
     return all(euclidean_distance((cx, cy), p) <= threshold_px for p in points)
+
+
+def speed_from_centers_kmh(centers: list[Point], fps: float, meters_per_px: float) -> float:
+    """يقدّر متوسط السرعة بالكم/ساعة من مسار مراكز bbox عبر فريمات متعاقبة.
+
+    مختلف عن `calibration.estimate_speed_kmh` الذي يأخذ إزاحة ومدّة جاهزتين.
+    """
+    if fps <= 0 or meters_per_px <= 0 or len(centers) < 2:
+        return 0.0
+    total_px = sum(euclidean_distance(centers[i], centers[i + 1]) for i in range(len(centers) - 1))
+    n_intervals = len(centers) - 1
+    dt_s = n_intervals / fps
+    if dt_s <= 0:
+        return 0.0
+    return (total_px * meters_per_px / dt_s) * 3.6
+
+
+def clip_segment_to_bbox(p1: Point, p2: Point, bbox: BBox) -> float:
+    """يعيد طول جزء القطعة (p1→p2) الواقع داخل bbox (Liang-Barsky).
+
+    يعود بـ 0.0 إذا كانت القطعة خارج الـ bbox تماماً.
+    يُستخدم لاكتشاف "التطفل" — هل خط المسار يمر فعلياً داخل صندوق المركبة؟
+    """
+    x1, y1 = p1
+    x2, y2 = p2
+    xmin, ymin, xmax, ymax = bbox
+    dx = x2 - x1
+    dy = y2 - y1
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x1 - xmin), (dx, xmax - x1), (-dy, y1 - ymin), (dy, ymax - y1)):
+        if p == 0:
+            if q < 0:
+                return 0.0
+            continue
+        t = q / p
+        if p < 0:
+            if t > t1:
+                return 0.0
+            if t > t0:
+                t0 = t
+        else:
+            if t < t0:
+                return 0.0
+            if t < t1:
+                t1 = t
+    clipped_len = ((dx * (t1 - t0)) ** 2 + (dy * (t1 - t0)) ** 2) ** 0.5
+    return clipped_len
