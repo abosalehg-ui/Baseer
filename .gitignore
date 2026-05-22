@@ -1,1 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# بيانات المشروع — لا تُرفع على Git
+data/videos/
+data/thumbnails/
+data/frames/
+data/annotations/raw/
+data/annotations/reviewed/
+data/exports/
+data/*.duckdb
+data/*.duckdb.wal
+
+# الموديلات
+models/pretrained/*.pt
+models/pretrained/*.onnx
+models/finetuned/*/
+
+# البيئة
 .env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Fixtures (للاختبارات الكبيرة)
+tests/fixtures/sample_videos/*.mp4
+tests/fixtures/sample_videos/*.mkv
