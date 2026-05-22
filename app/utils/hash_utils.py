@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-
 DEFAULT_SAMPLE_SIZE: int = 4 * 1024 * 1024
 
 

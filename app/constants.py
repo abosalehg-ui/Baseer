@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Final
-
 
 # ============================================
 # فئات الكشف للموديل (Detection Classes)
@@ -31,7 +30,7 @@ CLASS_NAME_TO_ID: Final[dict[str, int]] = {v: k for k, v in DETECTION_CLASSES.it
 # ============================================
 # أنواع المخالفات
 # ============================================
-class ViolationType(str, Enum):
+class ViolationType(StrEnum):
     """أنواع المخالفات المدعومة."""
 
     RED_LIGHT_RUNNING = "red_light_running"
@@ -55,7 +54,7 @@ VIOLATION_ARABIC_NAMES: Final[dict[ViolationType, str]] = {
 # ============================================
 # مصادر المقاطع
 # ============================================
-class SourceType(str, Enum):
+class SourceType(StrEnum):
     """مصادر المقاطع المدعومة."""
 
     DASHCAM = "dashcam"
@@ -75,7 +74,7 @@ SOURCE_ARABIC_NAMES: Final[dict[SourceType, str]] = {
 # ============================================
 # حالات معالجة الفيديو
 # ============================================
-class VideoStatus(str, Enum):
+class VideoStatus(StrEnum):
     """حالات معالجة المقطع."""
 
     IMPORTED = "imported"
@@ -87,7 +86,7 @@ class VideoStatus(str, Enum):
 # ============================================
 # حالات مراجعة المخالفات
 # ============================================
-class ReviewStatus(str, Enum):
+class ReviewStatus(StrEnum):
     """حالة مراجعة المخالفة."""
 
     PENDING = "pending"

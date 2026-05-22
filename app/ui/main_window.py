@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app import __app_name__, __version__
+from app.ui.library_view import LibraryView
 
 
 # ============================================
@@ -72,10 +73,7 @@ class MainWindow(QMainWindow):
         tabs.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         tabs.setTabPosition(QTabWidget.TabPosition.North)
 
-        tabs.addTab(
-            PlaceholderTab("المكتبة", "استيراد المقاطع وفهرستها وإدارة البيانات الوصفية."),
-            "المكتبة",
-        )
+        tabs.addTab(LibraryView(parent=self), "المكتبة")
         tabs.addTab(
             PlaceholderTab("التصنيف", "التصنيف اليدوي المدعوم بـ pseudo-labeling عبر CVAT."),
             "التصنيف",

@@ -10,7 +10,6 @@ import duckdb
 
 from app.config import AppSettings, get_settings
 
-
 # ============================================
 # تعريف المخطط (Schema DDL)
 # ============================================

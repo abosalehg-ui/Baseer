@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from app.core.db import Database
 
-
 EXPECTED_TABLES = {
     "videos",
     "scenes",
