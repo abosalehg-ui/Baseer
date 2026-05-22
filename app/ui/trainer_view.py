@@ -135,7 +135,7 @@ class TrainerView(QWidget):
         bar.addWidget(self._eval_btn)
 
         clear_btn = QPushButton("مسح السجل", self)
-        clear_btn.clicked.connect(self._log.clear)
+        clear_btn.clicked.connect(lambda: self._log.clear())
         bar.addWidget(clear_btn)
         bar.addStretch()
         return bar
