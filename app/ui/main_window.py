@@ -16,6 +16,7 @@ from PyQt6.QtWidgets import (
 from app import __app_name__, __version__
 from app.ui.analysis_view import AnalysisView
 from app.ui.annotator_view import AnnotatorView
+from app.ui.dashboard_view import DashboardView
 from app.ui.library_view import LibraryView
 from app.ui.trainer_view import TrainerView
 
@@ -80,10 +81,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(AnnotatorView(parent=self), "التصنيف")
         tabs.addTab(TrainerView(parent=self), "التدريب")
         tabs.addTab(AnalysisView(parent=self), "التحليل")
-        tabs.addTab(
-            PlaceholderTab("الداشبورد", "الإحصاءات والرسوم البيانية وتصدير الدراسات."),
-            "الداشبورد",
-        )
+        tabs.addTab(DashboardView(parent=self), "الداشبورد")
 
         self.setCentralWidget(tabs)
         self._tabs = tabs
