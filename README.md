@@ -131,6 +131,21 @@ python -m app.main
 
 ---
 
+## 📦 بناء مُثبِّت Windows (.exe)
+
+لتوزيع التطبيق كملف تنصيب واحد بدون الحاجة لتثبيت Python على جهاز المستخدم:
+
+```powershell
+pip install pyinstaller
+.\scripts\build_installer.ps1
+```
+
+السكربت يولّد الأيقونة، يحزم التطبيق بـ PyInstaller، ويبني مُثبِّت Windows عبر Inno Setup → `dist/installer/Baseer-Setup-0.1.0.exe`.
+
+📖 **التفاصيل الكاملة**: [`docs/build_installer.md`](./docs/build_installer.md)
+
+---
+
 ## 🧪 الاختبارات
 
 ```powershell
