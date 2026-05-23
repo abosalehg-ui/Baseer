@@ -177,6 +177,26 @@ hiddenimports = [..., "اسم_الموديول"]
 
 لو رأيت هذا الخطأ على نسخة قديمة، حدّث `app/config.py` لاستخدام `sys.frozen` للكشف عن الـbundle (PR رقم 19).
 
+### `_duckdb.InternalException: Failure while replaying WAL file`
+
+**محلول في v0.1.2**: التطبيق يكتشف ملف `.wal` فاسد (مخلّفات من crash سابق قبل إصلاح PermissionError) وينقله تلقائياً إلى `*.wal.broken-<timestamp>` ثم يفتح القاعدة من جديد. البيانات الملتزمة سليمة.
+
+لو احتجت تنظيف يدوي:
+```powershell
+del "$env:LOCALAPPDATA\Baseer\data\results.duckdb.wal"
+```
+
+### تحذيرات `Hidden import "*__mypyc" not found` أثناء PyInstaller
+
+**آمنة، يمكن تجاهلها**. هذه إضافات mypyc-compiled لمكتبة `charset-normalizer` (تابعة `requests`). PyInstaller يبحث عنها كاحتياط لكنها اختيارية — المكتبة تعمل بدونها عبر pure Python fallback.
+
+أمثلة للتحذيرات المتوقَّعة:
+```
+WARNING: Hidden import "ascii__mypyc" not found!
+WARNING: Hidden import "utf8__mypyc" not found!
+WARNING: Hidden import "validity__mypyc" not found!
+```
+
 ### الـapp لا يجد ffmpeg
 
 التطبيق يحذّر المستخدم عند البدء (في `app/main.py:_warn_if_ffmpeg_missing`). الحل: ضمّن مجلد ffmpeg في الـbundle عبر `binaries` في الـspec:
