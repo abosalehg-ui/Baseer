@@ -15,8 +15,43 @@
 | 📚 **المكتبة** | استيراد drag & drop، thumbnails، فلاتر، PySceneDetect، إدارة التكرار |
 | 🏷️ **التصنيف** | pseudo-labeling بـ YOLOv8x، تصدير CVAT XML، تجهيز dataset YOLOv8 (70/20/10) |
 | 🧠 **التدريب** | fine-tune YOLOv8m، live logs، تقييم mAP لكل class |
-| 🚦 **التحليل** | 6 كواشف مخالفات (إشارة حمراء، عكسي، خوذة، وقوف، تجاوز، سرعة)، evidence frames |
+| 🚦 **التحليل** | 9 كواشف مخالفات تلقائية + إدخال يدوي (إضافة/تعديل/حذف) مع حفظ المخالفات اليدوية عند إعادة التحليل |
 | 📊 **الداشبورد** | KPIs ملوّنة، رسوم تفاعلية (bar/line/heatmap)، مستعرض مخالفات بمراجعة، تصدير JSON/CSV/Excel/PDF عربي |
+
+---
+
+## 🚦 المخالفات المدعومة
+
+يغطّي التطبيق حالياً **9 أنواع مخالفات تلقائية** + قناة **إدخال يدوي** للحالات التي يرى المراجع البشري الحاجة لتسجيلها.
+
+| # | المخالفة | النوع | الكاشف | متطلبات |
+|---|----------|------|--------|---------|
+| 1 | 🚦 قطع الإشارة الحمراء | تلقائي | `RedLightDetector` | منطقة `stop_line` |
+| 2 | 🔄 السير بالاتجاه المعاكس | تلقائي | `WrongDirectionDetector` | عيّنة tracks ≥ 3 |
+| 3 | 🪖 عدم لبس الخوذة | تلقائي | `NoHelmetDetector` | — |
+| 4 | 🅿️ الوقوف الخاطئ | تلقائي | `IllegalParkingDetector` | منطقة `no_parking` |
+| 5 | ⤴️ التجاوز الخاطئ | تلقائي | `IllegalOvertakingDetector` | خط `lane_line_solid` |
+| 6 | 🏎️ السرعة الزائدة | تلقائي | `SpeedingDetector` | معايرة `meters_per_px` |
+| 7 | 🛣️ عدم الالتزام بالمسار | تلقائي | `LaneKeepingDetector` | خطوط مسار (YOLO أو zones) |
+| 8 | 💡 إساءة استخدام أنوار التلاقي | تلقائي (heuristic) | `HighBeamDetector` | ملف فيديو + إطارات ليلية |
+| 9 | 🚗💨 عدم ترك مسافة آمنة | تلقائي | `FollowingDistanceDetector` | معايرة `meters_per_px` |
+| ✍️ | مخالفة يدوية أخرى | **يدوي** | `ManualViolationDialog` | — |
+
+**ملاحظات تقنية:**
+
+- **عدم الالتزام بالمسار**: يقيس "التطفل" المستمر على خط مسار عبر قص قطعة-bbox (Liang–Barsky) لمدة ≥ 2 ثانية — مختلف عن التجاوز الذي يكشف عبور مرة واحدة لخط متصل.
+- **المسافة الآمنة**: يستخدم Time-to-Collision (TTC) + قاعدة نصف السرعة، مع اقتران المركبات في نفس المسار (x-tolerance) وتجاهل التوقف عند الإشارات (`< 15 km/h`).
+- **إساءة الأنوار** (heuristic — المرحلة 1): يكشف الإطارات الليلية (HSV mean V) ثم البقع البيضاء المشبعة في منطقة المصابيح، ويوسَم في الملاحظات بـ `[heuristic]` للمراجعة البشرية. المرحلة 2 (مستقبلية) تستبدل هذا بفئة YOLO `high_beam_on` مدرَّبة.
+- **التدخل البشري**: المخالفات اليدوية تُحفظ بـ `source='manual'` و `notes='[manual] ...'` ولا تُحذف عند إعادة التحليل بفضل شرط `AND source='auto'` في DELETE.
+
+### مراجع GitHub المفتوحة المستفاد منها
+
+| المخالفة | المرجع |
+|----------|--------|
+| المسار | [`cfzd/Ultra-Fast-Lane-Detection`](https://github.com/cfzd/Ultra-Fast-Lane-Detection)، [`Turoad/lanedet`](https://github.com/Turoad/lanedet) |
+| المسافة الآمنة (TTC) | [`enginBozkurt/SFND_3D_Object_Tracking-1`](https://github.com/enginBozkurt/SFND_3D_Object_Tracking-1)، [`visualbuffer/copilot`](https://github.com/visualbuffer/copilot) |
+| المسافة (px→m) | [`paul-pias/Object-Detection-and-Distance-Measurement`](https://github.com/paul-pias/Object-Detection-and-Distance-Measurement) |
+| الأنوار العالية | [`lewjiayi/Vehicle-Headlight-Tracker`](https://github.com/lewjiayi/Vehicle-Headlight-Tracker) |
 
 ---
 
@@ -109,7 +144,7 @@ python -m pytest --cov=app --cov-report=term
 python -m pytest tests/test_rules.py -v
 ```
 
-**185 اختبار** يغطّي كل وحدات الـ core بدون الحاجة لـ GPU.
+**212 اختبار** (208 نجاح + 4 متخطّى لمكتبات اختيارية) يغطّي كل وحدات الـ core بدون الحاجة لـ GPU.
 
 ---
 
@@ -125,16 +160,19 @@ baseer/
 │   │   ├── trainer_view.py
 │   │   ├── analysis_view.py
 │   │   ├── dashboard_view.py
+│   │   ├── dialogs/           # ManualViolationDialog (إضافة/تعديل مخالفة يدوية)
 │   │   └── widgets/           # thumbnail_grid, video_player, stats_charts
 │   │
 │   ├── core/                  # المنطق التطبيقي (لا يستورد PyQt6)
-│   │   ├── db.py              # DuckDB connection + 7 جداول
+│   │   ├── db.py              # DuckDB connection + 7 جداول + ترحيل source/manual_user
 │   │   ├── library.py         # استيراد، dedup، metadata
 │   │   ├── annotator.py       # CVAT XML export
 │   │   ├── dataset.py         # CVAT YOLO → YOLOv8 (70/20/10)
 │   │   ├── trainer.py         # YOLOv8 fine-tuning (mockable)
 │   │   ├── analyzer.py        # inference + ByteTrack + extract_violations
-│   │   ├── rules.py           # 6 كواشف مخالفات + Zone + Track
+│   │   ├── rules.py           # 6 كواشف أصلية + Base/Zone/Track
+│   │   ├── detectors/         # كواشف إضافية (lane_keeping, following_distance, high_beam)
+│   │   ├── frame_sampler.py   # قارئ إطارات حسب الرقم (لـ HighBeam)
 │   │   ├── calibration.py     # meters_per_px + سرعة
 │   │   ├── ocr.py             # PaddleOCR + تطبيع لوحات سعودية
 │   │   ├── error_analysis.py  # تحديد classes ضعيفة + توصيات
@@ -153,7 +191,7 @@ baseer/
 │   │   └── geometry.py        # bbox, polygon, IoU, intersection
 │   │
 │   ├── config.py              # pydantic-settings من .env
-│   ├── constants.py           # DETECTION_CLASSES (13) + ViolationType (6)
+│   ├── constants.py           # DETECTION_CLASSES (13) + ViolationType (10) + ViolationSource
 │   └── main.py                # نقطة الدخول
 │
 ├── models/
@@ -182,7 +220,7 @@ baseer/
 │   ├── architecture.md
 │   └── annotation_guide.md
 │
-├── tests/                     # 185 اختبار
+├── tests/                     # 212 اختبار
 └── .github/workflows/ci.yml   # ruff + black + pytest على كل PR
 ```
 
@@ -240,10 +278,10 @@ python scripts/export_study.py --format all --output data/exports
 
 | المعيار | الحالة |
 |--------|--------|
-| اختبارات وحدة | **185** اختبار مارّ |
+| اختبارات وحدة | **208** نجاح + **4** متخطّى (تبعيات اختيارية) |
 | Ruff (lint) | نظيف 100% |
 | Black (format) | منسّق |
-| لا ملف > 500 سطر | ✅ (أكبر ملف: `rules.py` ≈ 480 سطر) |
+| لا ملف > 500 سطر | ✅ (الكواشف الإضافية في `app/core/detectors/`) |
 | لا I/O في main thread | ✅ (كل عملية ثقيلة → QThread) |
 | Core بدون PyQt | ✅ (`app/core/` لا يستورد من Qt) |
 
