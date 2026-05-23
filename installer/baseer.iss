@@ -64,6 +64,14 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Excludes: "{#MyAppExeName}"; Flags: 
 ; ملف ترخيص واختياري README
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme
 
+[Dirs]
+; نُنشئ مجلد بيانات قابل للكتابة في %LocalAppData% للمستخدم الحالي
+; التطبيق يستخدمه تلقائياً (عبر app/config.py عند اكتشاف الـ frozen bundle)
+Name: "{localappdata}\Baseer"; Permissions: users-modify
+Name: "{localappdata}\Baseer\data"; Permissions: users-modify
+Name: "{localappdata}\Baseer\models"; Permissions: users-modify
+Name: "{localappdata}\Baseer\logs"; Permissions: users-modify
+
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\assets\icon.ico"; Tasks: desktopicon
