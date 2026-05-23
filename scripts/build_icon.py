@@ -90,9 +90,7 @@ def _draw_eye(img: Image.Image) -> None:
         (TL_GREEN, (light_r * 2 + gap) * 2),
     ):
         ly = top_y + offset
-        d.ellipse(
-            (cx - light_r, ly - light_r, cx + light_r, ly + light_r), fill=color
-        )
+        d.ellipse((cx - light_r, ly - light_r, cx + light_r, ly + light_r), fill=color)
 
     # لمعة العين (نصف هلال أبيض شفاف أعلى اليسار)
     shine_w = int(eye_w * 0.28)
