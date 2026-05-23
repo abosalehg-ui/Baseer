@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 import duckdb
 
 from app.config import AppSettings, get_settings
+
+logger = logging.getLogger(__name__)
 
 # ============================================
 # تعريف المخطط (Schema DDL)
@@ -141,10 +144,40 @@ class Database:
         self._read_only = read_only
         self._lock = threading.RLock()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn: duckdb.DuckDBPyConnection = duckdb.connect(
-            database=str(self._db_path),
-            read_only=read_only,
-        )
+        self._conn = self._connect_with_wal_recovery()
+
+    def _connect_with_wal_recovery(self) -> duckdb.DuckDBPyConnection:
+        """يفتح اتصال DuckDB ويتعافى تلقائياً من WAL تالف من crash سابق.
+
+        DuckDB يحتفظ بـ `<db>.wal` لمعاملات لم تُكتب بعد. لو حدث crash
+        (مثل PermissionError قبل تطبيق PR #19)، يبقى الملف بحالة فاسدة
+        وعند فتح DB لاحقاً يفشل بـ InternalException على replay.
+        نُسلك:
+        1) محاولة فتح طبيعية
+        2) لو فشل بسبب WAL، ننقل `.wal` لـ `.wal.broken-<ts>` ونعيد المحاولة
+        3) لا نلمس ملف DB الرئيسي — البيانات الملتزمة تبقى محفوظة
+        """
+        try:
+            return duckdb.connect(database=str(self._db_path), read_only=self._read_only)
+        except duckdb.Error as exc:
+            msg = str(exc)
+            wal_path = self._db_path.with_suffix(self._db_path.suffix + ".wal")
+            if "wal" not in msg.lower() or not wal_path.exists():
+                raise
+            import time
+
+            backup = wal_path.with_suffix(f".wal.broken-{int(time.time())}")
+            logger.warning(
+                "WAL فاسد في %s — نُنحّيه إلى %s ونعيد فتح القاعدة (البيانات الملتزمة سليمة)",
+                wal_path,
+                backup.name,
+            )
+            try:
+                wal_path.rename(backup)
+            except OSError as rename_err:
+                logger.error("تعذّر نقل WAL: %s — حاول الحذف اليدوي", rename_err)
+                raise
+            return duckdb.connect(database=str(self._db_path), read_only=self._read_only)
 
     @property
     def path(self) -> Path:
