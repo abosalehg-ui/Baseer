@@ -6,8 +6,10 @@ import logging
 import shutil
 import sys
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from app import __app_name_en__
@@ -56,11 +58,35 @@ def main() -> int:
     app.setApplicationName(__app_name_en__)
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
 
+    icon = _load_app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
+
     _warn_if_ffmpeg_missing(logger)
 
     window = MainWindow()
+    if not icon.isNull():
+        window.setWindowIcon(icon)
     window.show()
     return app.exec()
+
+
+def _load_app_icon() -> QIcon:
+    """يحمّل أيقونة التطبيق — يدعم التشغيل المباشر وتشغيل PyInstaller الـbundle."""
+    candidates: list[Path] = []
+    # bundle PyInstaller يضع الملفات في sys._MEIPASS
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "assets" / "icon.ico")
+        candidates.append(Path(meipass) / "assets" / "icon.png")
+    # التشغيل المباشر من المستودع
+    repo_assets = Path(__file__).resolve().parent.parent / "assets"
+    candidates.append(repo_assets / "icon.ico")
+    candidates.append(repo_assets / "icon.png")
+    for path in candidates:
+        if path.exists():
+            return QIcon(str(path))
+    return QIcon()
 
 
 def _warn_if_ffmpeg_missing(logger: logging.Logger) -> None:
