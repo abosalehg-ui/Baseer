@@ -46,12 +46,23 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # نستبعد الثقيل من البناء الافتراضي — يبقى Python يستوردهم لو موجودين
-        # المستخدم يقدر يحذفهم من قائمة excludes لو يريد bundle مكتفي بذاته
+        # استبعاد الموديولات غير المستخدمة لتقليل حجم الـbundle
         "tkinter",
         "matplotlib.tests",
         "numpy.tests",
         "PIL.tests",
+        "pytest",
+        "pytest_cov",
+        "torch.test",
+        "torch.testing",
+        "torch.distributed",  # غير مستخدم في Baseer
+        "torch.onnx",  # غير مستخدم
+        "torch.jit",  # غير مستخدم في الاستخدام العادي
+        "scipy.io.tests",
+        "scipy.signal.tests",
+        "scipy.stats.tests",
+        # ملاحظة: لو لا تحتاج OCR، أضف هنا: "paddle", "paddleocr"
+        # ولو تريد CPU-only، استخدم torch CPU wheel — انظر docs/slim_installer.md
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

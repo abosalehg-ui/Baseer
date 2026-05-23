@@ -162,10 +162,20 @@ hiddenimports = [..., "اسم_الموديول"]
 
 ### المُثبِّت ضخم (> 1 GB)
 
-السبب الأكبر: `torch` + `ultralytics` + `paddlepaddle`. خيارات:
-- **استبعد paddleocr** إن لم تستخدم OCR (احذف من `requirements.txt`)
-- **استخدم torch CPU-only** لو لم يحتج المُستخدم النهائي لـ GPU (`+cpu` index)
-- **upx مضغوط** (يُخفض ≈30٪): فعّله بـ `upx=True` في `Baseer.spec` بعد تثبيت [UPX](https://upx.github.io/)
+السبب الأكبر: `torch` + `ultralytics` + `paddlepaddle`. الحلول مرتبة بالأولوية:
+
+1. **torch CPU-only** (الأسرع — ينخفض إلى ~700 MB): عدّل `requirements.txt` ليثبت `torch` من `https://download.pytorch.org/whl/cpu`
+2. **استبعد paddleocr** إن لم تستخدم OCR (احذف من `requirements.txt`)
+3. **Bootstrap installer** (الأمثل — ~150 MB): انظر `docs/slim_installer.md`
+4. **upx مضغوط** (يُخفض ≈30٪): فعّله بـ `upx=True` في `Baseer.spec` بعد تثبيت [UPX](https://upx.github.io/)
+
+📖 **التفاصيل الكاملة لكل استراتيجية**: [`docs/slim_installer.md`](./slim_installer.md)
+
+### "Permission denied" عند الكتابة في Program Files
+
+**محلول في v0.1.1**: التطبيق يستخدم `%LocalAppData%\Baseer\` تلقائياً عند اكتشاف PyInstaller bundle.
+
+لو رأيت هذا الخطأ على نسخة قديمة، حدّث `app/config.py` لاستخدام `sys.frozen` للكشف عن الـbundle (PR رقم 19).
 
 ### الـapp لا يجد ffmpeg
 
