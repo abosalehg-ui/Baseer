@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QThread
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
@@ -81,6 +82,13 @@ class AnnotatorView(QWidget):
         self._stride_spin.setRange(1, 30)
         self._stride_spin.setValue(1)
         thresh_bar.addWidget(self._stride_spin)
+
+        self._tracking_check = QCheckBox("تتبّع (ByteTrack)", self)
+        self._tracking_check.setChecked(True)
+        self._tracking_check.setToolTip(
+            "لازم لاستخراج المخالفات: بدونه لا تُنشأ tracks ولا تُكشف أي مخالفة."
+        )
+        thresh_bar.addWidget(self._tracking_check)
 
         thresh_bar.addStretch()
         root.addLayout(thresh_bar)
@@ -172,6 +180,8 @@ class AnnotatorView(QWidget):
             confidence=float(self._conf_spin.value()),
             iou=float(self._iou_spin.value()),
             frame_stride=int(self._stride_spin.value()),
+            device=self._settings.cuda_device,
+            enable_tracking=self._tracking_check.isChecked(),
         )
         self._start_inference(video_ids, config)
 

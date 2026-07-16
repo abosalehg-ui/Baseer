@@ -22,14 +22,15 @@ class ImportWorker(QObject):
 
     def __init__(
         self,
-        path: Path,
+        path: Path | list[Path],
         source_type: SourceType,
         *,
         generate_thumbnails: bool = True,
         service: LibraryService | None = None,
     ) -> None:
         super().__init__()
-        self._path = path
+        # نقبل مساراً واحداً أو قائمة مسارات (للإسقاط/الاختيار المتعدد)
+        self._paths: list[Path] = [path] if isinstance(path, Path) else list(path)
         self._source_type = source_type
         self._generate_thumbnails = generate_thumbnails
         self._service = service
@@ -43,8 +44,8 @@ class ImportWorker(QObject):
         """نقطة الدخول — تُستدعى عبر QThread.started → slot."""
         try:
             service = self._service or LibraryService()
-            report = service.import_path(
-                self._path,
+            report = service.import_paths(
+                list(self._paths),
                 self._source_type,
                 generate_thumbnails=self._generate_thumbnails,
                 progress_cb=self._on_progress,

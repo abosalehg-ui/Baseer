@@ -151,9 +151,7 @@ class LibraryView(QWidget):
         valid = [p for p in paths if p.exists()]
         if not valid:
             return
-        source = self._selected_source_for_import()
-        for path in valid:
-            self._start_import(path, source)
+        self._start_import(valid, self._selected_source_for_import())
 
     # ============================================
     # إجراءات الشريط
@@ -167,14 +165,12 @@ class LibraryView(QWidget):
         )
         if not paths:
             return
-        source = self._selected_source_for_import()
-        for p in paths:
-            self._start_import(Path(p), source)
+        self._start_import([Path(p) for p in paths], self._selected_source_for_import())
 
     def _on_import_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "اختر مجلداً يحتوي المقاطع")
         if folder:
-            self._start_import(Path(folder), self._selected_source_for_import())
+            self._start_import([Path(folder)], self._selected_source_for_import())
 
     def _selected_source_for_import(self) -> SourceType:
         data = self._source_combo.currentData()
@@ -183,19 +179,22 @@ class LibraryView(QWidget):
     # ============================================
     # تنفيذ الاستيراد في thread
     # ============================================
-    def _start_import(self, path: Path, source: SourceType) -> None:
+    def _start_import(self, paths: list[Path], source: SourceType) -> None:
         if self._import_thread is not None and self._import_thread.isRunning():
             QMessageBox.information(
                 self, "استيراد قيد التنفيذ", "جارٍ استيراد عملية أخرى — انتظر انتهاءها."
             )
             return
+        if not paths:
+            return
 
         self._progress.setVisible(True)
         self._progress.setRange(0, 0)
-        self._status_label.setText(f"جارٍ استيراد {path.name}...")
+        label = paths[0].name if len(paths) == 1 else f"{len(paths)} عناصر"
+        self._status_label.setText(f"جارٍ استيراد {label}...")
 
         thread = QThread(self)
-        worker = ImportWorker(path, source, service=self._service)
+        worker = ImportWorker(paths, source, service=self._service)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)

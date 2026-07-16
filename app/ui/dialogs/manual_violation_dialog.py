@@ -240,24 +240,35 @@ class ManualViolationDialog(QDialog):
         )
         notes = f"[manual] {data.notes}" if data.notes else "[manual]"
         viol_id = int(self._existing["id"])
+        try:
+            user = getpass.getuser()
+        except Exception:  # noqa: BLE001
+            user = "unknown"
+        # التعديل البشري يحوّل المخالفة إلى source='manual' حتى لا تُحذف عند
+        # إعادة التحليل (DELETE ... AND source='auto')، ويُحدّث video_id أيضاً.
         self._db.execute(
             """
             UPDATE violations SET
+                video_id = ?,
                 violation_type = ?,
                 start_ms = ?,
                 end_ms = ?,
                 evidence_frames = ?,
                 license_plate = ?,
-                notes = ?
+                notes = ?,
+                source = 'manual',
+                manual_user = ?
             WHERE id = ?
             """,
             (
+                data.video_id,
                 data.violation_type.value,
                 data.start_ms,
                 data.end_ms,
                 evidence_json,
                 data.license_plate or None,
                 notes,
+                user,
                 viol_id,
             ),
         )

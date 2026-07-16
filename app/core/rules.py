@@ -15,12 +15,12 @@ from app.utils.geometry import (
     BBox,
     Point,
     bbox_center,
-    euclidean_distance,
     heading_angle,
     iou,
     is_stationary,
     point_in_polygon,
     segments_intersect,
+    speed_from_centers_kmh,
 )
 
 logger = logging.getLogger(__name__)
@@ -480,7 +480,8 @@ class SpeedingDetector(BaseViolationDetector):
                 continue
             if len(track.centers) < 2:
                 continue
-            speed = self._estimate_speed(track, effective_fps)
+            assert self._meters_per_px is not None
+            speed = speed_from_centers_kmh(track.centers, effective_fps, self._meters_per_px)
             if speed <= self._speed_limit_kmh:
                 continue
             violations.append(
@@ -495,18 +496,6 @@ class SpeedingDetector(BaseViolationDetector):
                 )
             )
         return violations
-
-    def _estimate_speed(self, track: Track, fps: float) -> float:
-        assert self._meters_per_px is not None
-        centers = track.centers
-        total_px = sum(
-            euclidean_distance(centers[i], centers[i + 1]) for i in range(len(centers) - 1)
-        )
-        n_intervals = len(centers) - 1
-        dt_s = n_intervals / fps
-        if dt_s <= 0:
-            return 0.0
-        return (total_px * self._meters_per_px / dt_s) * 3.6
 
 
 # ============================================

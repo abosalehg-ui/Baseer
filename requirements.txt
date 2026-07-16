@@ -3,15 +3,16 @@
 # ============================================
 
 # AI / ML
+# ملاحظة: torch/torchvision يُثبَّتان يدوياً بفهرس CUDA (راجع README) — التثبيت من
+# PyPI هنا يسحب نسخة CPU. أبقيناهما مرجعاً للإصدار الأدنى.
 ultralytics>=8.3.0
 torch>=2.5.0
 torchvision>=0.20.0
+# opencv-python فقط — لا تُضِف opencv-contrib-python معه (يتصادمان على مساحة cv2)
 opencv-python>=4.10.0
-opencv-contrib-python>=4.10.0
 paddleocr>=2.8.0
 paddlepaddle-gpu>=2.6.0
 numpy>=1.26.0
-scipy>=1.13.0
 
 # قاعدة البيانات
 duckdb>=1.1.0
@@ -20,9 +21,7 @@ pandas>=2.2.0
 # الواجهة
 PyQt6>=6.7.0
 PyQt6-Qt6>=6.7.0
-qt-material>=2.14
 pyqtgraph>=0.13.0
-qtawesome>=1.3.0
 
 # معالجة الفيديو
 ffmpeg-python>=0.2.0
@@ -37,7 +36,6 @@ python-bidi>=0.5.0
 # التصدير
 openpyxl>=3.1.0
 reportlab>=4.2.0
-fpdf2>=2.7.0
 
 # الإعدادات
 python-dotenv>=1.0.0

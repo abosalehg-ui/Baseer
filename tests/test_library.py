@@ -163,3 +163,106 @@ def test_total_duration_sums_all_videos(tmp_path: Path, service: LibraryService)
         service.import_path(tmp_path, SourceType.DASHCAM)
 
     assert service.total_duration_seconds() == pytest.approx(12.5 * 3)
+
+
+def test_perceptual_duplicate_is_not_auto_dropped(tmp_path: Path, service: LibraryService) -> None:
+    """مقطعان مختلفان ثنائياً بنفس الـ phash (مثل كاميرا CCTV ثابتة) يُستوردان كلاهما.
+
+    الإسقاط التلقائي محصور في التطابق الثنائي (file_hash)؛ التكرار الحسّي يُترك
+    للمراجعة عبر detect_duplicates بدل رفضه بصمت.
+    """
+    a = tmp_path / "cctv_clip1.mp4"
+    b = tmp_path / "cctv_clip2.mp4"
+    a.write_bytes(b"AAAA" * 512)  # محتوى ثنائي مختلف
+    b.write_bytes(b"BBBB" * 512)
+
+    with (
+        patch("app.core.library.extract_metadata", side_effect=_fake_meta),
+        patch("app.core.library.generate_thumbnail", side_effect=lambda *args, **kw: args[1]),
+        patch("app.core.library.perceptual_hash_from_image_path", return_value="same" * 16),
+    ):
+        r1 = service.import_path(a, SourceType.CCTV)
+        r2 = service.import_path(b, SourceType.CCTV)
+
+    assert len(r1.imported) == 1
+    assert len(r2.imported) == 1
+    assert len(r2.duplicates) == 0
+    assert service.count_videos() == 2
+    # phash المشترك يظهر كمجموعة تكرار حسّي للمراجعة البشرية
+    groups = service.detect_duplicates()
+    assert any(g.match_type == "perceptual" for g in groups)
+
+
+def test_import_multiple_paths_imports_all(tmp_path: Path, service: LibraryService) -> None:
+    """استيراد عدة ملفات دفعة واحدة يستوردها كلها (لا الأول فقط)."""
+    files = []
+    for i in range(4):
+        f = tmp_path / f"clip{i}.mp4"
+        f.write_bytes(f"UNIQUE-{i}".encode() * 256)
+        files.append(f)
+
+    with (
+        patch("app.core.library.extract_metadata", side_effect=_fake_meta),
+        patch("app.core.library.generate_thumbnail", side_effect=lambda *args, **kw: args[1]),
+        patch(
+            "app.core.library.perceptual_hash_from_image_path",
+            side_effect=[f"ph{i}" * 8 for i in range(4)],
+        ),
+    ):
+        report = service.import_paths(files, SourceType.DASHCAM)
+
+    assert len(report.imported) == 4
+    assert service.count_videos() == 4
+
+
+def test_import_paths_dedups_repeated_path(tmp_path: Path, service: LibraryService) -> None:
+    """تكرار نفس المسار في القائمة لا يؤدي لاستيراد مزدوج."""
+    f = tmp_path / "one.mp4"
+    f.write_bytes(b"ONCE" * 256)
+
+    with (
+        patch("app.core.library.extract_metadata", side_effect=_fake_meta),
+        patch("app.core.library.generate_thumbnail", side_effect=lambda *args, **kw: args[1]),
+        patch("app.core.library.perceptual_hash_from_image_path", return_value="zz" * 8),
+    ):
+        report = service.import_paths([f, f], SourceType.OTHER)
+
+    assert len(report.imported) == 1
+    assert service.count_videos() == 1
+
+
+def test_delete_video_removes_children_and_thumbnail(
+    tmp_path: Path, service: LibraryService
+) -> None:
+    """حذف مقطع مُحلَّل ينجح ويحذف الأبناء وملف الـ thumbnail (لا FK constraint)."""
+    video = tmp_path / "analyzed.mp4"
+    video.write_bytes(b"\x00" * 4096)
+
+    with (
+        patch("app.core.library.extract_metadata", side_effect=_fake_meta),
+        patch("app.core.library.generate_thumbnail", side_effect=lambda *a, **k: a[1]),
+        patch("app.core.library.perceptual_hash_from_image_path", return_value="dd" * 8),
+    ):
+        report = service.import_path(video, SourceType.DASHCAM)
+    vid = report.imported[0]
+
+    db = service._db  # noqa: SLF001
+    # ننشئ ملف الـ thumbnail فعلياً على المسار المخزَّن (generate_thumbnail مُقنَّع)
+    stored_thumb = db.fetch_one("SELECT thumbnail_path FROM videos WHERE id = ?", (vid,))[0]
+    assert stored_thumb
+    thumb = Path(stored_thumb)
+    thumb.parent.mkdir(parents=True, exist_ok=True)
+    thumb.write_bytes(b"JPEGDATA")
+    db.execute("INSERT INTO detections (video_id, frame_no) VALUES (?, 1)", (vid,))
+    db.execute("INSERT INTO violations (video_id, violation_type) VALUES (?, 'speeding')", (vid,))
+    db.execute("INSERT INTO scenes (video_id, scene_index) VALUES (?, 0)", (vid,))
+    db.execute("INSERT INTO zones (video_id, zone_type) VALUES (?, 'stop_line')", (vid,))
+
+    service.delete_video(vid)
+
+    assert service.get_video(vid) is None
+    assert db.fetch_one("SELECT COUNT(*) FROM detections WHERE video_id = ?", (vid,))[0] == 0
+    assert db.fetch_one("SELECT COUNT(*) FROM violations WHERE video_id = ?", (vid,))[0] == 0
+    assert db.fetch_one("SELECT COUNT(*) FROM scenes WHERE video_id = ?", (vid,))[0] == 0
+    assert db.fetch_one("SELECT COUNT(*) FROM zones WHERE video_id = ?", (vid,))[0] == 0
+    assert not thumb.exists()
