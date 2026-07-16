@@ -91,6 +91,16 @@ class AnalysisView(QWidget):
         refresh_btn.clicked.connect(self.refresh)
         bar.addWidget(refresh_btn)
 
+        self._zones_btn = QPushButton("🗺️ تحرير المناطق", self)
+        self._zones_btn.setToolTip("رسم مناطق (خط توقف/ممنوع الوقوف/خط مسار) للمقطع المختار")
+        self._zones_btn.clicked.connect(self._on_edit_zones)
+        bar.addWidget(self._zones_btn)
+
+        self._calib_btn = QPushButton("📏 معايرة", self)
+        self._calib_btn.setToolTip("معايرة المقطع المختار (لازمة لكاشفي السرعة والمسافة)")
+        self._calib_btn.clicked.connect(self._on_calibrate)
+        bar.addWidget(self._calib_btn)
+
         bar.addStretch()
 
         # أزرار التدخل البشري (يدوي)
@@ -251,6 +261,52 @@ class AnalysisView(QWidget):
             "SELECT id, filename FROM videos ORDER BY id"
         )
         return [(int(r[0]), str(r[1])) for r in rows]
+
+    def _selected_video_id(self) -> int | None:
+        """معرّف المقطع المختار في جدول المقاطع (أعلى الشاشة)."""
+        selection = (
+            self._table.selectionModel().selectedRows() if self._table.selectionModel() else []
+        )
+        if not selection:
+            QMessageBox.information(self, "اختر مقطعاً", "حدد مقطعاً من الجدول العلوي أولاً.")
+            return None
+        return int(self._table.item(selection[0].row(), 0).text())
+
+    def _load_frame_for_video(self, video_id: int):
+        from app.ui.dialogs.zone_editor_dialog import load_first_frame
+
+        row = self._service._db.fetch_one(  # noqa: SLF001
+            "SELECT filepath FROM videos WHERE id = ?", (video_id,)
+        )
+        if row is None or not row[0]:
+            return None
+        return load_first_frame(str(row[0]))
+
+    def _on_edit_zones(self) -> None:
+        vid = self._selected_video_id()
+        if vid is None:
+            return
+        from app.ui.dialogs import ZoneEditorDialog
+
+        image = self._load_frame_for_video(vid)
+        dlg = ZoneEditorDialog(
+            video_id=vid, image=image, db=self._service._db, parent=self  # noqa: SLF001
+        )
+        dlg.exec()
+        self._status.setText(f"حُدِّثت مناطق المقطع #{vid}")
+
+    def _on_calibrate(self) -> None:
+        vid = self._selected_video_id()
+        if vid is None:
+            return
+        from app.ui.dialogs import CalibrationDialog
+
+        image = self._load_frame_for_video(vid)
+        dlg = CalibrationDialog(
+            video_id=vid, image=image, db=self._service._db, parent=self  # noqa: SLF001
+        )
+        dlg.exec()
+        self._status.setText(f"حُدِّثت معايرة المقطع #{vid}")
 
     def _on_add_manual(self) -> None:
         videos = self._load_videos_for_dialog()
