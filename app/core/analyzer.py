@@ -39,7 +39,9 @@ class AnalysisConfig:
     device: str | int = 0
     frame_stride: int = 1
     max_frames: int | None = None
-    enable_tracking: bool = False
+    # التتبع مفعّل افتراضياً: بدون track_id تُهمَل كل الكشوفات في build_tracks
+    # وتعود كل الكواشف بصفر مخالفات (كلها track-based).
+    enable_tracking: bool = True
 
 
 @dataclass
@@ -150,7 +152,12 @@ class AnalyzerService:
         """
         from app.core.calibration import CalibrationService
         from app.core.detectors import FollowingDistanceDetector, HighBeamDetector
-        from app.core.rules import all_default_detectors, load_zones_from_db, run_detectors
+        from app.core.rules import (
+            SpeedingDetector,
+            all_default_detectors,
+            load_zones_from_db,
+            run_detectors,
+        )
 
         detections = self.detections_for_video(video_id)
         if not detections:
@@ -162,6 +169,8 @@ class AnalyzerService:
         detectors = all_default_detectors()
         calibration = CalibrationService(db=self._db).get_calibration(video_id)
         if calibration is not None and calibration.meters_per_px > 0:
+            # كلا الكاشفين يحتاجان المعايرة نفسها (meters_per_px)
+            detectors.append(SpeedingDetector(meters_per_px=calibration.meters_per_px))
             detectors.append(FollowingDistanceDetector(meters_per_px=calibration.meters_per_px))
         video_filepath = self._video_filepath(video_id)
         if video_filepath is not None and Path(video_filepath).exists():

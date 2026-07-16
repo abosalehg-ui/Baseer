@@ -179,6 +179,7 @@ class TrainerView(QWidget):
             imgsz=int(self._imgsz.value()),
             patience=int(self._patience.value()),
             lr0=float(self._lr0.value()),
+            device=self._settings.cuda_device,
             project=self._settings.models_dir / "finetuned",
             name=self._run_name.text(),
         )

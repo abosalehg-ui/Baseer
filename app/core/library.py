@@ -67,9 +67,38 @@ class LibraryService:
         progress_cb: callable | None = None,
     ) -> ImportReport:
         """يستورد ملفاً أو كل مقاطع المجلد."""
+        return self.import_paths(
+            [path],
+            source_type,
+            generate_thumbnails=generate_thumbnails,
+            progress_cb=progress_cb,
+        )
+
+    def import_paths(
+        self,
+        paths: list[Path | str],
+        source_type: SourceType | str = SourceType.OTHER,
+        *,
+        generate_thumbnails: bool = True,
+        progress_cb: callable | None = None,
+    ) -> ImportReport:
+        """يستورد عدة ملفات/مجلدات في عملية واحدة بتقرير وتقدّم موحّدين.
+
+        يجمع كل مقاطع الفيديو عبر كل المسارات (مع إزالة التكرار في القائمة نفسها)
+        ثم يستوردها دفعةً واحدة — يتجنّب سلوك "استيراد أول ملف فقط" عند الإسقاط المتعدد.
+        """
         report = ImportReport()
         source = source_type.value if isinstance(source_type, SourceType) else source_type
-        files = list(self._iter_video_files(Path(path)))
+
+        files: list[Path] = []
+        seen: set[Path] = set()
+        for path in paths:
+            for file_path in self._iter_video_files(Path(path)):
+                resolved = file_path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                files.append(file_path)
 
         for index, file_path in enumerate(files, start=1):
             if progress_cb is not None:
@@ -112,7 +141,7 @@ class LibraryService:
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("فشل حساب phash لـ %s: %s", file_path.name, exc)
 
-            if self._is_duplicate(fhash, phash):
+            if self._is_exact_duplicate(fhash):
                 report.duplicates.append(file_path)
                 return
 
@@ -179,13 +208,14 @@ class LibraryService:
         assert row is not None
         return int(row[0])
 
-    def _is_duplicate(self, fhash: str, phash: str | None) -> bool:
-        """يفحص التكرار عبر file_hash ثم phash."""
-        if self._db.fetch_one("SELECT id FROM videos WHERE file_hash = ?", (fhash,)):
-            return True
-        if phash and self._db.fetch_one("SELECT id FROM videos WHERE phash = ?", (phash,)):
-            return True
-        return False
+    def _is_exact_duplicate(self, fhash: str) -> bool:
+        """يفحص التكرار الثنائي الحقيقي (file_hash) فقط — أساس الإسقاط التلقائي الآمن.
+
+        التكرار الحسّي (phash) لا يُسقط المقطع تلقائياً لتجنّب رفض مقاطع CCTV
+        المختلفة من كاميرا ثابتة بصمت؛ يُعرض بدلاً من ذلك في `detect_duplicates()`
+        للمراجعة البشرية.
+        """
+        return self._db.fetch_one("SELECT id FROM videos WHERE file_hash = ?", (fhash,)) is not None
 
     # ============================================
     # الاستعلام والإدارة
@@ -228,9 +258,40 @@ class LibraryService:
         """يعيد كل بيانات المقطع."""
         return self._db.fetch_one("SELECT * FROM videos WHERE id = ?", (video_id,))
 
+    # الجداول الأبناء التي تشير إلى videos(id) — تُحذف قبل الأب.
+    # DuckDB يفرض القيود المرجعية ولا يدعم ON DELETE CASCADE، فنحذف يدوياً.
+    _CHILD_TABLES: tuple[str, ...] = (
+        "detections",
+        "violations",
+        "scenes",
+        "calibrations",
+        "zones",
+    )
+
     def delete_video(self, video_id: int) -> None:
-        """يحذف مقطعاً (cascading للجداول المرتبطة)."""
+        """يحذف مقطعاً وكل صفوفه المرتبطة (detections/violations/scenes/…) وملف الـ thumbnail.
+
+        DuckDB يفرض القيود المرجعية ولا يدعم ON DELETE CASCADE، فنحذف الأبناء
+        يدوياً بترتيب صحيح (child→parent) ثم الأب.
+
+        ملاحظة: لا نلفّها في معاملة صريحة واحدة لأن DuckDB يمنع حذف الأب وأبنائه
+        داخل المعاملة نفسها (قيد FK يبقى مرئياً حتى الـ commit). الحذف المتتابع
+        بالـ autocommit يفي بالقيد ويطبّق الأبناء قبل الأب.
+        """
+        thumb_row = self._db.fetch_one(
+            "SELECT thumbnail_path FROM videos WHERE id = ?", (video_id,)
+        )
+        thumbnail_path = thumb_row[0] if thumb_row else None
+
+        for table in self._CHILD_TABLES:
+            self._db.execute(f"DELETE FROM {table} WHERE video_id = ?", (video_id,))
         self._db.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+
+        if thumbnail_path:
+            try:
+                Path(thumbnail_path).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("تعذّر حذف thumbnail %s: %s", thumbnail_path, exc)
 
     def update_source_type(self, video_id: int, source_type: SourceType | str) -> None:
         """يحدّث نوع المصدر."""

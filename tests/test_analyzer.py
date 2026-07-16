@@ -191,6 +191,44 @@ def test_extract_violations_runs_rules_and_stores_to_db(
     assert status[0] == "analyzed"
 
 
+def test_extract_violations_registers_speeding_when_calibrated(
+    tmp_db: Database, seeded_video: int, tmp_path: Path
+) -> None:
+    """عند وجود معايرة، يُسجَّل SpeedingDetector ويكشف السرعة الزائدة (منع نكوص C1-ج)."""
+    import json as _json
+
+    # مركبة تتحرك بسرعة كبيرة عبر الفريمات
+    detections = [
+        Detection(
+            i,
+            int(i * 1000 / 30),
+            "vehicle",
+            0.9,
+            (i * 60.0, 100.0, i * 60.0 + 40, 150.0),
+            track_id=1,
+        )
+        for i in range(6)
+    ]
+    service = AnalyzerService(db=tmp_db, inference_fn=_fake_inference_factory(detections))
+    service.analyze_video(seeded_video, AnalysisConfig(model_path=tmp_path / "x.pt"))
+
+    # معايرة: 0.05 م/بكسل → ~60px/فريم × 30fps × 0.05 ≈ 90 م/س ⇒ سرعة عالية جداً
+    tmp_db.execute(
+        "INSERT INTO calibrations (video_id, reference_pts, meters_per_px) VALUES (?, ?, ?)",
+        (seeded_video, _json.dumps([[0, 0], [100, 0]]), 0.05),
+    )
+
+    count = service.extract_violations(seeded_video, fps=30.0)
+    assert count >= 1
+    types = {
+        r[0]
+        for r in tmp_db.fetch_all(
+            "SELECT violation_type FROM violations WHERE video_id = ?", (seeded_video,)
+        )
+    }
+    assert "speeding" in types
+
+
 def test_extract_violations_returns_zero_for_video_without_detections(
     tmp_db: Database, tmp_path: Path
 ) -> None:
