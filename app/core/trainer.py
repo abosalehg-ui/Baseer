@@ -100,11 +100,19 @@ class TrainerService:
         config: TrainConfig,
         *,
         progress_cb: ProgressCallback | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> TrainResult:
-        """يبدأ تدريب YOLOv8 ويُعيد ملخّص النتيجة."""
+        """يبدأ تدريب YOLOv8 ويُعيد ملخّص النتيجة.
+
+        `should_stop`: دالة تُستطلَع بعد كل epoch؛ عند إرجاعها True نطلب من
+        ultralytics إيقاف التدريب مبكراً (يُحفظ آخر checkpoint).
+        """
         self._validate_paths(config)
-        train = self._train_fn or _default_train
-        result = train(config, progress_cb)
+        if self._train_fn is not None:
+            # الدالة المحقونة (للاختبار) تبقى بتوقيعها ثنائي الوسائط
+            result = self._train_fn(config, progress_cb)
+        else:
+            result = _default_train(config, progress_cb, should_stop)
         logger.info(
             "اكتمل التدريب — best.pt في %s، mAP50=%s",
             result.best_pt,
@@ -200,7 +208,11 @@ def loss_series(rows: list[dict[str, float]]) -> dict[str, list[float]]:
 # ============================================
 # الـ implementation الفعلي (lazy import)
 # ============================================
-def _default_train(config: TrainConfig, progress_cb: ProgressCallback | None) -> TrainResult:
+def _default_train(
+    config: TrainConfig,
+    progress_cb: ProgressCallback | None,
+    should_stop: Callable[[], bool] | None = None,
+) -> TrainResult:
     """مغلّف ultralytics.train — يُستدعى عند الاستخدام الحقيقي فقط."""
     try:
         from ultralytics import YOLO  # type: ignore
@@ -209,8 +221,8 @@ def _default_train(config: TrainConfig, progress_cb: ProgressCallback | None) ->
 
     model = YOLO(str(config.base_model))
 
-    if progress_cb is not None:
-        _attach_progress_callback(model, config.epochs, progress_cb)
+    if progress_cb is not None or should_stop is not None:
+        _attach_progress_callback(model, config.epochs, progress_cb, should_stop)
 
     results = model.train(
         data=str(config.dataset_yaml),
@@ -240,21 +252,31 @@ def _default_train(config: TrainConfig, progress_cb: ProgressCallback | None) ->
     )
 
 
-def _attach_progress_callback(model: Any, total_epochs: int, callback: ProgressCallback) -> None:
-    """يربط callback يُستدعى بعد كل epoch."""
+def _attach_progress_callback(
+    model: Any,
+    total_epochs: int,
+    callback: ProgressCallback | None,
+    should_stop: Callable[[], bool] | None = None,
+) -> None:
+    """يربط callback يُستدعى بعد كل epoch، ويطلب الإيقاف عند should_stop()."""
 
     def _on_epoch_end(trainer: Any) -> None:
-        metrics = dict(getattr(trainer, "metrics", {}) or {})
-        callback(
-            EpochMetrics(
-                epoch=int(getattr(trainer, "epoch", 0)) + 1,
-                total=total_epochs,
-                box_loss=float(metrics.get("train/box_loss", 0.0)),
-                cls_loss=float(metrics.get("train/cls_loss", 0.0)),
-                dfl_loss=float(metrics.get("train/dfl_loss", 0.0)),
-                map50=metrics.get("metrics/mAP50(B)"),
+        if callback is not None:
+            metrics = dict(getattr(trainer, "metrics", {}) or {})
+            callback(
+                EpochMetrics(
+                    epoch=int(getattr(trainer, "epoch", 0)) + 1,
+                    total=total_epochs,
+                    box_loss=float(metrics.get("train/box_loss", 0.0)),
+                    cls_loss=float(metrics.get("train/cls_loss", 0.0)),
+                    dfl_loss=float(metrics.get("train/dfl_loss", 0.0)),
+                    map50=metrics.get("metrics/mAP50(B)"),
+                )
             )
-        )
+        # طلب الإيقاف المبكر من ultralytics (يحفظ آخر checkpoint)
+        if should_stop is not None and should_stop():
+            trainer.stop = True
+            logger.info("طُلب إيقاف التدريب — سيتوقف بعد هذا الـ epoch")
 
     try:
         model.add_callback("on_train_epoch_end", _on_epoch_end)

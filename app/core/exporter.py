@@ -5,14 +5,69 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import os
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
+from app.config import PROJECT_ROOT
 from app.constants import SOURCE_ARABIC_NAMES, VIOLATION_ARABIC_NAMES, SourceType, ViolationType
 from app.core.dashboard import DashboardService, ViolationRow
 
 logger = logging.getLogger(__name__)
+
+# مسارات مرشّحة لخط عربي يدعم التشكيل — أول موجود يُستخدم في PDF
+_SYSTEM_ARABIC_FONT_CANDIDATES: tuple[str, ...] = (
+    "/usr/share/fonts/truetype/amiri/Amiri-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/kacst/KacstOne.ttf",
+    "/Library/Fonts/Arial.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/tahoma.ttf",
+)
+
+
+def find_arabic_font() -> Path | None:
+    """يبحث عن ملف خط عربي (TTF) بترتيب: متغيّر بيئة → assets/fonts → خطوط النظام.
+
+    يُرجع أول مسار موجود، أو None (فيعود PDF إلى Helvetica الذي لا يرسم العربية).
+    دالة نقية قابلة للاختبار دون reportlab.
+    """
+    env = os.environ.get("BASEER_PDF_FONT")
+    if env and Path(env).is_file():
+        return Path(env)
+
+    assets_fonts = PROJECT_ROOT / "assets" / "fonts"
+    if assets_fonts.is_dir():
+        for ttf in sorted(assets_fonts.glob("*.ttf")):
+            return ttf
+
+    for candidate in _SYSTEM_ARABIC_FONT_CANDIDATES:
+        if Path(candidate).is_file():
+            return Path(candidate)
+    return None
+
+
+def _register_arabic_font() -> str | None:
+    """يسجّل الخط العربي في reportlab ويُرجع اسمه، أو None لو غير متاح."""
+    font_path = find_arabic_font()
+    if font_path is None:
+        logger.warning(
+            "لم يُعثر على خط عربي لـ PDF — النص العربي قد لا يظهر. "
+            "ضع خطاً في assets/fonts/ أو عيّن BASEER_PDF_FONT."
+        )
+        return None
+    try:
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+
+        font_name = "BaseerArabic"
+        pdfmetrics.registerFont(TTFont(font_name, str(font_path)))
+        logger.info("سُجّل خط PDF العربي: %s", font_path)
+        return font_name
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("تعذّر تسجيل خط PDF العربي %s: %s", font_path, exc)
+        return None
 
 
 # ============================================
@@ -171,12 +226,14 @@ def export_pdf(
         title="Baseer Study",
     )
 
+    arabic_font = _register_arabic_font()
     styles = getSampleStyleSheet()
+    body_font = arabic_font or styles["Normal"].fontName
     rtl_style = ParagraphStyle(
         "rtl",
         parent=styles["Normal"],
         alignment=2,  # right
-        fontName=styles["Normal"].fontName,
+        fontName=body_font,
         fontSize=11,
         leading=16,
     )
@@ -184,6 +241,7 @@ def export_pdf(
         "rtl_title",
         parent=styles["Heading1"],
         alignment=2,
+        fontName=body_font,
         fontSize=18,
         leading=22,
     )
@@ -192,22 +250,22 @@ def export_pdf(
 
     kpis = study.get("kpis", {})
     story.append(Paragraph(_shape("المؤشرات الرئيسية"), rtl_style))
-    story.append(_kpi_table(kpis))
+    story.append(_kpi_table(kpis, arabic_font))
     story.append(Spacer(1, 12))
 
     story.append(Paragraph(_shape("المخالفات حسب النوع"), rtl_style))
-    story.append(_by_type_table(study.get("by_type", [])))
+    story.append(_by_type_table(study.get("by_type", []), arabic_font))
     story.append(Spacer(1, 12))
 
     if violations:
         story.append(Paragraph(_shape("أحدث المخالفات (آخر 30)"), rtl_style))
-        story.append(_violations_table(violations[:30]))
+        story.append(_violations_table(violations[:30], arabic_font))
 
     doc.build(story)
     return out
 
 
-def _kpi_table(kpis: dict) -> object:
+def _kpi_table(kpis: dict, font: str | None = None) -> object:
     from reportlab.lib import colors
     from reportlab.platypus import Table
 
@@ -218,11 +276,11 @@ def _kpi_table(kpis: dict) -> object:
         [_shape("متوسط مخالفات/مقطع"), f"{kpis.get('avg_violations_per_video', 0.0):.2f}"],
     ]
     table = Table(data, colWidths=[8, 4], hAlign="RIGHT")
-    table.setStyle(_default_table_style(colors))
+    table.setStyle(_default_table_style(colors, font))
     return table
 
 
-def _by_type_table(by_type: list) -> object:
+def _by_type_table(by_type: list, font: str | None = None) -> object:
     from reportlab.lib import colors
     from reportlab.platypus import Table
 
@@ -230,11 +288,11 @@ def _by_type_table(by_type: list) -> object:
     for vtype, count in by_type:
         data.append([_shape(_violation_arabic_name(vtype)), str(count)])
     table = Table(data, colWidths=[10, 3], hAlign="RIGHT")
-    table.setStyle(_default_table_style(colors))
+    table.setStyle(_default_table_style(colors, font))
     return table
 
 
-def _violations_table(violations: list[ViolationRow]) -> object:
+def _violations_table(violations: list[ViolationRow], font: str | None = None) -> object:
     from reportlab.lib import colors
     from reportlab.platypus import Table
 
@@ -256,23 +314,24 @@ def _violations_table(violations: list[ViolationRow]) -> object:
             ]
         )
     table = Table(data, colWidths=[6, 4, 2, 3], hAlign="RIGHT")
-    table.setStyle(_default_table_style(colors))
+    table.setStyle(_default_table_style(colors, font))
     return table
 
 
-def _default_table_style(colors_module) -> object:
+def _default_table_style(colors_module, font: str | None = None) -> object:
     from reportlab.platypus import TableStyle
 
-    return TableStyle(
-        [
-            ("BACKGROUND", (0, 0), (-1, 0), colors_module.HexColor("#2c3e50")),
-            ("TEXTCOLOR", (0, 0), (-1, 0), colors_module.white),
-            ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
-            ("GRID", (0, 0), (-1, -1), 0.5, colors_module.grey),
-            ("FONTSIZE", (0, 0), (-1, -1), 10),
-            ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
-        ]
-    )
+    commands = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors_module.HexColor("#2c3e50")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors_module.white),
+        ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors_module.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 6),
+    ]
+    if font is not None:
+        commands.append(("FONTNAME", (0, 0), (-1, -1), font))
+    return TableStyle(commands)
 
 
 def _shape(text: str) -> str:

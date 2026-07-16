@@ -257,7 +257,21 @@ class DashboardView(QWidget):
                 lambda _checked=False, vid=violation_id, st=status: self._mark_review(vid, st)
             )
             layout.addWidget(btn)
+
+        evidence_btn = QPushButton("🎬", container)
+        evidence_btn.setToolTip("عرض الأدلة (إطارات + مشغّل عند وقت المخالفة)")
+        evidence_btn.setFixedWidth(32)
+        evidence_btn.clicked.connect(
+            lambda _checked=False, vid=violation_id: self._show_evidence(vid)
+        )
+        layout.addWidget(evidence_btn)
         return container
+
+    def _show_evidence(self, violation_id: int) -> None:
+        from app.ui.dialogs.evidence_dialog import EvidenceDialog
+
+        dlg = EvidenceDialog(violation_id, db=self._service._db, parent=self)  # noqa: SLF001
+        dlg.exec()
 
     def _mark_review(self, violation_id: int, status: ReviewStatus) -> None:
         try:
