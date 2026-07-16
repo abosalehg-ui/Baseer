@@ -164,8 +164,7 @@ class AnnotatorView(QWidget):
             QMessageBox.warning(
                 self,
                 "النموذج غير موجود",
-                f"تأكد من وجود الموديل: {model_path}\n"
-                "نزّله أولاً عبر scripts/download_models.py",
+                f"تأكد من وجود الموديل: {model_path}\n" "نزّله أولاً عبر scripts/download_models.py",
             )
             return
 
