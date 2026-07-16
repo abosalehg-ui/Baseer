@@ -22,11 +22,20 @@ class TrainingWorker(QObject):
         super().__init__()
         self._config = config
         self._service = service
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """يطلب إيقاف التدريب بعد الـ epoch الحالي."""
+        self._cancelled = True
 
     def run(self) -> None:
         try:
             service = self._service or TrainerService()
-            result = service.train(self._config, progress_cb=self._on_epoch)
+            result = service.train(
+                self._config,
+                progress_cb=self._on_epoch,
+                should_stop=lambda: self._cancelled,
+            )
             self.finished.emit(result)
         except Exception as exc:  # noqa: BLE001
             logger.exception("فشل عامل التدريب")

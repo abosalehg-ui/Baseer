@@ -157,3 +157,36 @@ def test_record_export_writes_to_db(tmp_path: Path, tmp_db: Database) -> None:
     assert row is not None
     assert row[0] == "demo"
     assert row[1] == "json"
+
+
+# ============================================
+# find_arabic_font (منطق البحث عن الخط — بلا reportlab)
+# ============================================
+def test_find_arabic_font_prefers_env_override(tmp_path, monkeypatch) -> None:
+    from app.core.exporter import find_arabic_font
+
+    font = tmp_path / "MyArabic.ttf"
+    font.write_bytes(b"fake-ttf")
+    monkeypatch.setenv("BASEER_PDF_FONT", str(font))
+    assert find_arabic_font() == font
+
+
+def test_find_arabic_font_ignores_missing_env(monkeypatch) -> None:
+    from app.core.exporter import find_arabic_font
+
+    monkeypatch.setenv("BASEER_PDF_FONT", "/no/such/font.ttf")
+    result = find_arabic_font()
+    # يعود لخطوط النظام/الحزمة أو None — لكن لا يعيد المسار غير الموجود
+    assert result is None or result.is_file()
+
+
+def test_find_arabic_font_uses_bundled_assets(tmp_path, monkeypatch) -> None:
+    import app.core.exporter as exporter_mod
+
+    monkeypatch.delenv("BASEER_PDF_FONT", raising=False)
+    fonts_dir = tmp_path / "assets" / "fonts"
+    fonts_dir.mkdir(parents=True)
+    bundled = fonts_dir / "Amiri-Regular.ttf"
+    bundled.write_bytes(b"fake")
+    monkeypatch.setattr(exporter_mod, "PROJECT_ROOT", tmp_path)
+    assert exporter_mod.find_arabic_font() == bundled

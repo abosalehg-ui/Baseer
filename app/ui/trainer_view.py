@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -120,7 +121,7 @@ class TrainerView(QWidget):
         self._lr0.setValue(0.001)
         form.addRow("Initial LR:", self._lr0)
 
-        self._run_name = QLabel("baseer-v1", self)
+        self._run_name = QLineEdit(self._next_run_name(), self)
         form.addRow("Run name:", self._run_name)
         return form
 
@@ -129,6 +130,11 @@ class TrainerView(QWidget):
         self._start_btn = QPushButton("بدء التدريب", self)
         self._start_btn.clicked.connect(self._on_start)
         bar.addWidget(self._start_btn)
+
+        self._stop_btn = QPushButton("إيقاف التدريب", self)
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.clicked.connect(self._on_stop)
+        bar.addWidget(self._stop_btn)
 
         self._eval_btn = QPushButton("تقييم best.pt", self)
         self._eval_btn.clicked.connect(self._on_evaluate)
@@ -210,7 +216,16 @@ class TrainerView(QWidget):
 
         self._thread = thread
         self._worker = worker
+        self._start_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
         thread.start()
+
+    def _on_stop(self) -> None:
+        if self._worker is not None:
+            self._worker.cancel()
+            self._status.setText("جارٍ الإيقاف بعد الـ epoch الحالي...")
+            self._log.append("⏹ طُلب إيقاف التدريب")
+            self._stop_btn.setEnabled(False)
 
     def _on_epoch(self, m: EpochMetrics) -> None:
         self._progress.setValue(m.epoch)
@@ -230,11 +245,15 @@ class TrainerView(QWidget):
             self._log.append(f"mAP50 النهائية: {result.final_map50:.3f}")
         self._thread = None
         self._worker = None
+        self._start_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
 
     def _on_failed(self, message: str) -> None:
         self._progress.setVisible(False)
         self._status.setText("فشل التدريب")
         self._log.append(f"✗ خطأ: {message}")
+        self._start_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
         QMessageBox.critical(self, "فشل التدريب", message)
         self._thread = None
         self._worker = None
@@ -274,3 +293,14 @@ class TrainerView(QWidget):
 
     def _default_dataset_yaml(self) -> str:
         return str(self._settings.data_dir / "dataset" / "dataset.yaml")
+
+    def _next_run_name(self) -> str:
+        """يولّد اسم run افتراضياً غير مستخدم (baseer-vN) من مجلدات التدريب السابقة."""
+        try:
+            existing = {p.name for p in self._service.list_runs()}
+        except Exception:  # noqa: BLE001
+            existing = set()
+        n = 1
+        while f"baseer-v{n}" in existing:
+            n += 1
+        return f"baseer-v{n}"

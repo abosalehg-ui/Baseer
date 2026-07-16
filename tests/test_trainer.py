@@ -240,3 +240,52 @@ def test_loss_series_extracts_columns() -> None:
     assert series["train/box_loss"] == [0.9, 0.7]
     assert series["train/cls_loss"] == [0.5, 0.4]
     assert series["train/dfl_loss"] == [0.7, 0.6]
+
+
+def test_attach_progress_callback_sets_stop_flag() -> None:
+    """should_stop=True يجعل الـ callback يضبط trainer.stop (إيقاف مبكر)."""
+    from app.core.trainer import _attach_progress_callback
+
+    captured: dict[str, object] = {}
+
+    class _FakeModel:
+        def add_callback(self, name: str, fn: object) -> None:
+            captured["fn"] = fn
+
+    class _FakeTrainer:
+        epoch = 0
+        metrics: dict[str, float] = {}
+        stop = False
+
+    model = _FakeModel()
+    epochs_seen: list[int] = []
+    _attach_progress_callback(
+        model,
+        total_epochs=10,
+        callback=lambda m: epochs_seen.append(m.epoch),
+        should_stop=lambda: True,
+    )
+    trainer = _FakeTrainer()
+    captured["fn"](trainer)  # type: ignore[operator]
+    assert trainer.stop is True
+    assert epochs_seen == [1]  # epoch=0 → +1
+
+
+def test_attach_progress_callback_no_stop_when_flag_false() -> None:
+    from app.core.trainer import _attach_progress_callback
+
+    captured: dict[str, object] = {}
+
+    class _FakeModel:
+        def add_callback(self, name: str, fn: object) -> None:
+            captured["fn"] = fn
+
+    class _FakeTrainer:
+        epoch = 3
+        metrics: dict[str, float] = {}
+        stop = False
+
+    _attach_progress_callback(_FakeModel(), 10, callback=None, should_stop=lambda: False)
+    trainer = _FakeTrainer()
+    captured["fn"](trainer)  # type: ignore[operator]
+    assert trainer.stop is False

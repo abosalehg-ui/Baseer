@@ -98,11 +98,24 @@ class LibraryView(QWidget):
         toolbar.addWidget(self._source_combo)
 
         toolbar.addSeparator()
+        dupes_btn = QPushButton("مراجعة التكرارات", self)
+        dupes_btn.setToolTip("عرض المقاطع المكررة (ثنائياً أو بصرياً) وحذف الزائد")
+        dupes_btn.clicked.connect(self._on_review_duplicates)
+        toolbar.addWidget(dupes_btn)
+
+        toolbar.addSeparator()
         refresh_btn = QPushButton("تحديث", self)
         refresh_btn.clicked.connect(self.refresh)
         toolbar.addWidget(refresh_btn)
 
         return toolbar
+
+    def _on_review_duplicates(self) -> None:
+        from app.ui.dialogs.duplicates_dialog import DuplicatesDialog
+
+        dlg = DuplicatesDialog(service=self._service, parent=self)
+        dlg.exec()
+        self.refresh()
 
     def _build_filters(self) -> QWidget:
         bar = QWidget(self)
