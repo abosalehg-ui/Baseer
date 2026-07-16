@@ -271,6 +271,13 @@ baseer/
 # تنزيل النماذج الجاهزة
 python scripts/download_models.py
 
+# تعريف مناطق مقطع (خط توقف، ممنوع الوقوف، خط مسار) — يفكّ حصار كواشف المناطق
+python scripts/define_zones.py --video-id 3 --zones zones.json
+python scripts/define_zones.py --video-id 3 --list
+
+# معايرة مقطع (meters_per_px) — يفكّ حصار كاشفَي السرعة والمسافة الآمنة
+python scripts/calibrate.py --video-id 3 --points 100 500 400 500 --distances 10
+
 # تجهيز dataset من CVAT export
 python scripts/prepare_dataset.py --source data/annotations/reviewed --output data/dataset
 

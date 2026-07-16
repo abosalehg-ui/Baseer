@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import QAction, QCloseEvent
 from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
@@ -19,6 +21,8 @@ from app.ui.annotator_view import AnnotatorView
 from app.ui.dashboard_view import DashboardView
 from app.ui.library_view import LibraryView
 from app.ui.trainer_view import TrainerView
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -105,6 +109,20 @@ class MainWindow(QMainWindow):
         status = QStatusBar(self)
         status.showMessage("جاهز")
         self.setStatusBar(status)
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        """يُغلق اتصال قاعدة البيانات المفرد عند الخروج لتفريغ الـ WAL بأمان.
+
+        ترك الاتصال مفتوحاً عند إغلاق مفاجئ كان يخلّف WAL بحالة وسطى — وهو
+        السيناريو الذي استلزم آلية التعافي في db.py.
+        """
+        try:
+            from app.core.db import reset_database_singleton
+
+            reset_database_singleton()
+        except Exception:  # noqa: BLE001
+            logger.exception("تعذّر إغلاق قاعدة البيانات عند الخروج")
+        super().closeEvent(event)
 
     def _show_about(self) -> None:
         from PyQt6.QtWidgets import QMessageBox

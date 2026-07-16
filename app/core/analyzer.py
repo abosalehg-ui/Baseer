@@ -67,10 +67,16 @@ class AnalyzerService:
         db: Database | None = None,
         settings: AppSettings | None = None,
         inference_fn: InferenceCallable | None = None,
+        ocr_service: Any = None,
+        frame_provider_factory: Callable[[str], Any] | None = None,
     ) -> None:
         self._settings = settings or get_settings()
         self._db = db or get_database(self._settings)
         self._inference_fn = inference_fn
+        # اختياريان لقراءة اللوحات — قابلان للحقن للاختبار. عند None يُبنيان كسولاً
+        # عند الحاجة فقط (وجود كشوفات license_plate + ملف فيديو).
+        self._ocr_service = ocr_service
+        self._frame_provider_factory = frame_provider_factory
 
     # ============================================
     # واجهة عامة
@@ -178,6 +184,9 @@ class AnalyzerService:
 
         candidates = run_detectors(detections, zones, actual_fps, detectors=detectors)
 
+        # قراءة لوحات المركبات المخالِفة (اختياري — يُتخطّى بلا كشوفات لوحات/فيديو)
+        plates = self._read_plates(candidates, detections, video_filepath)
+
         # نحذف فقط المخالفات التلقائية حتى تبقى المخالفات اليدوية محفوظة بعد إعادة التحليل
         self._db.execute(
             "DELETE FROM violations WHERE video_id = ? AND source = 'auto'", (video_id,)
@@ -191,18 +200,20 @@ class AnalyzerService:
                 c.confidence,
                 c.track_id,
                 json.dumps(c.evidence_frames),
+                plates.get(i, (None, None))[0],
+                plates.get(i, (None, None))[1],
                 c.notes,
                 "auto",
             )
-            for c in candidates
+            for i, c in enumerate(candidates)
         ]
         if rows:
             self._db.executemany(
                 """
                 INSERT INTO violations
                     (video_id, violation_type, start_ms, end_ms, confidence,
-                     track_id, evidence_frames, notes, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     track_id, evidence_frames, license_plate, plate_conf, notes, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )
@@ -213,6 +224,73 @@ class AnalyzerService:
         )
         logger.info("تم استخراج %d مخالفة من المقطع %d", len(rows), video_id)
         return len(rows)
+
+    def _read_plates(
+        self,
+        candidates: list[Any],
+        detections: list[Detection],
+        video_filepath: str | None,
+    ) -> dict[int, tuple[str | None, float | None]]:
+        """يقرأ لوحة كل مخالفة لها track (فهرس المخالفة → (نص، ثقة)).
+
+        يُتخطّى بصمت إن لم توجد كشوفات لوحات أو تعذّر بناء مزوّد الإطارات — فلا
+        يؤثّر على المسار الشائع (بلا فيديو/لوحات) ولا يبطئ الاختبارات.
+        """
+        has_plate_dets = any(d.class_name == "license_plate" for d in detections)
+        if not has_plate_dets:
+            return {}
+        provider = self._build_frame_provider(video_filepath)
+        if provider is None:
+            return {}
+
+        from app.core.plate_reader import plate_detections_for_track, read_plate_for_crops
+        from app.core.rules import build_tracks, detections_by_frame
+
+        tracks_by_id = {t.track_id: t for t in build_tracks(detections)}
+        by_frame = detections_by_frame(detections)
+        ocr = self._resolve_ocr_service()
+
+        out: dict[int, tuple[str | None, float | None]] = {}
+        try:
+            for i, cand in enumerate(candidates):
+                track = tracks_by_id.get(getattr(cand, "track_id", None))
+                if track is None:
+                    continue
+                track_bboxes = {d.frame_no: d.bbox for d in track.detections}
+                crops = plate_detections_for_track(track_bboxes, by_frame)
+                if not crops:
+                    continue
+                read = read_plate_for_crops(crops, provider, ocr)
+                if read.text and read.confidence > 0:
+                    out[i] = (read.text, float(read.confidence))
+        finally:
+            if self._frame_provider_factory is None:
+                # أنشأناه داخلياً — نغلقه
+                close = getattr(provider, "close", None)
+                if callable(close):
+                    close()
+        return out
+
+    def _build_frame_provider(self, video_filepath: str | None) -> Any:
+        if self._frame_provider_factory is not None:
+            return self._frame_provider_factory(video_filepath or "")
+        if video_filepath is None or not Path(video_filepath).exists():
+            return None
+        try:
+            from app.core.frame_sampler import FrameSampler
+
+            return FrameSampler(video_filepath)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("تعذّر فتح الفيديو لقراءة اللوحات: %s", exc)
+            return None
+
+    def _resolve_ocr_service(self) -> Any:
+        if self._ocr_service is not None:
+            return self._ocr_service
+        from app.core.ocr import OCRService
+
+        self._ocr_service = OCRService()
+        return self._ocr_service
 
     def _fps_for_video(self, video_id: int) -> float:
         row = self._db.fetch_one("SELECT fps FROM videos WHERE id = ?", (video_id,))
@@ -271,23 +349,27 @@ def _default_inference(filepath: Path, config: AnalysisConfig) -> Iterable[Detec
 
     model = YOLO(str(config.model_path))
     stream = model.track if config.enable_tracking else model.predict
+    # نُمرّر vid_stride لـ ultralytics ليتخطّى الإطارات على مستوى فك التشفير/الاستدلال
+    # بدل الاستدلال على كل الإطارات ثم رميها — توفير مباشر بنسبة stride.
+    stride = max(1, config.frame_stride)
     results = stream(
         source=str(filepath),
         conf=config.confidence,
         iou=config.iou,
         imgsz=config.imgsz,
         device=config.device,
+        vid_stride=stride,
         stream=True,
         verbose=False,
     )
 
     fps = _probe_fps(filepath)
-    for frame_idx, frame_result in enumerate(results):
-        if config.max_frames and frame_idx >= config.max_frames:
+    for kept_idx, frame_result in enumerate(results):
+        if config.max_frames and kept_idx >= config.max_frames:
             break
-        if config.frame_stride > 1 and frame_idx % config.frame_stride != 0:
-            continue
-        yield from _detections_from_frame(frame_result, frame_idx, fps)
+        # ultralytics يُرجع فقط الإطارات المُبقاة؛ رقم الإطار الحقيقي = المؤشر × stride
+        real_frame_no = kept_idx * stride
+        yield from _detections_from_frame(frame_result, real_frame_no, fps)
 
 
 def _probe_fps(filepath: Path) -> float:

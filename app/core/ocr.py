@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -103,6 +103,11 @@ class OCRService:
         readings = self._invoke_recognizer(path)
         return self._best_reading(readings)
 
+    def read_array(self, image: Any) -> OCRResult:
+        """يقرأ لوحة من مصفوفة صورة (numpy BGR) بدل مسار ملف."""
+        readings = self._invoke_recognizer(image)
+        return self._best_reading(readings)
+
     def read_track_plates(
         self,
         plate_image_paths: list[Path],
@@ -110,23 +115,52 @@ class OCRService:
         min_confidence: float = 0.3,
     ) -> PlateRead:
         """يقرأ عدة صور لوحة لنفس track ويُرجع أفضل قراءة بالتصويت."""
+        return self._vote(
+            (self._safe_read(path, self.read_image) for path in plate_image_paths),
+            min_confidence=min_confidence,
+        )
+
+    def read_track_plate_images(
+        self,
+        images: list[Any],
+        *,
+        min_confidence: float = 0.3,
+    ) -> PlateRead:
+        """كـ `read_track_plates` لكن من مصفوفات صور بدل مسارات ملفات."""
+        return self._vote(
+            (self._safe_read(img, self.read_array) for img in images),
+            min_confidence=min_confidence,
+        )
+
+    # ============================================
+    # داخلي
+    # ============================================
+    @staticmethod
+    def _safe_read(source: Any, reader: Callable[[Any], OCRResult]) -> OCRResult | None:
+        try:
+            return reader(source)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("فشل قراءة اللوحة: %s", exc)
+            return None
+
+    @staticmethod
+    def _vote(
+        results: Iterable[OCRResult | None],
+        *,
+        min_confidence: float,
+    ) -> PlateRead:
+        """يُصوّت على أفضل نص عبر عدة قراءات (الأكثر تكراراً ثم الأعلى ثقة)."""
         votes: dict[str, list[float]] = {}
-        for path in plate_image_paths:
-            try:
-                result = self.read_image(path)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("فشل قراءة %s: %s", path, exc)
-                continue
-            if result.is_empty or result.confidence < min_confidence:
+        for result in results:
+            if result is None or result.is_empty or result.confidence < min_confidence:
                 continue
             votes.setdefault(result.text, []).append(result.confidence)
 
         if not votes:
             return PlateRead(text="", confidence=0.0, reads_count=0)
 
-        # القراءة الأكثر تكراراً، عند التعادل الأعلى متوسط ثقة
         def _score(item: tuple[str, list[float]]) -> tuple[int, float]:
-            text, confs = item
+            _text, confs = item
             return len(confs), sum(confs) / len(confs)
 
         best_text, best_confs = max(votes.items(), key=_score)
@@ -136,17 +170,16 @@ class OCRService:
             reads_count=len(best_confs),
         )
 
-    # ============================================
-    # داخلي
-    # ============================================
-    def _invoke_recognizer(self, path: Path) -> list[tuple[str, float]]:
+    def _invoke_recognizer(self, source: Path | Any) -> list[tuple[str, float]]:
         if self._recognize_fn is not None:
-            return list(self._recognize_fn(path))
-        return self._default_recognize(path)
+            return list(self._recognize_fn(source))
+        return self._default_recognize(source)
 
-    def _default_recognize(self, path: Path) -> list[tuple[str, float]]:
+    def _default_recognize(self, source: Path | Any) -> list[tuple[str, float]]:
         engine = self._get_paddle_engine()
-        result = engine.ocr(str(path), cls=True)
+        # PaddleOCR يقبل مساراً نصياً أو مصفوفة numpy مباشرة
+        arg = str(source) if isinstance(source, str | Path) else source
+        result = engine.ocr(arg, cls=True)
         out: list[tuple[str, float]] = []
         if not result or not result[0]:
             return out

@@ -229,6 +229,57 @@ def test_extract_violations_registers_speeding_when_calibrated(
     assert "speeding" in types
 
 
+def test_extract_violations_fills_license_plate_via_ocr(
+    tmp_db: Database, seeded_video: int, tmp_path: Path
+) -> None:
+    """المخالفة التلقائية تُملأ لوحتها من OCR عبر كشوفات license_plate المقترنة (C1-د)."""
+    import json as _json
+
+    import numpy as np
+
+    # مركبة تعبر خط التوقف والإشارة حمراء + كشف لوحة داخل صندوقها
+    detections = [
+        Detection(0, 0, "vehicle", 0.9, (40, 0, 60, 10), track_id=1),
+        Detection(1, 33, "vehicle", 0.9, (40, 40, 60, 50), track_id=1),
+        Detection(1, 33, "license_plate", 0.9, (45, 42, 55, 48), track_id=5),
+        Detection(2, 66, "vehicle", 0.9, (40, 60, 60, 70), track_id=1),
+        Detection(2, 66, "license_plate", 0.9, (45, 62, 55, 68), track_id=5),
+        Detection(2, 66, "traffic_light_red", 0.95, (200, 0, 220, 20), track_id=99),
+    ]
+
+    class _FakeProvider:
+        def get_frame(self, frame_no: int) -> np.ndarray:
+            return np.zeros((80, 80, 3), dtype=np.uint8)
+
+        def close(self) -> None:
+            pass
+
+    from app.core.ocr import OCRService
+
+    ocr = OCRService(recognize_fn=lambda _img: [("أ ب ج 1234", 0.9)])
+    service = AnalyzerService(
+        db=tmp_db,
+        inference_fn=_fake_inference_factory(detections),
+        ocr_service=ocr,
+        frame_provider_factory=lambda _path: _FakeProvider(),
+    )
+    service.analyze_video(seeded_video, AnalysisConfig(model_path=tmp_path / "x.pt"))
+    tmp_db.execute(
+        "INSERT INTO zones (video_id, zone_type, polygon) VALUES (?, ?, ?)",
+        (seeded_video, "stop_line", _json.dumps([[0, 50], [200, 50]])),
+    )
+
+    count = service.extract_violations(seeded_video, fps=30.0)
+    assert count == 1
+    row = tmp_db.fetch_one(
+        "SELECT violation_type, license_plate, plate_conf FROM violations WHERE video_id = ?",
+        (seeded_video,),
+    )
+    assert row[0] == "red_light_running"
+    assert row[1] and "1234" in row[1]
+    assert row[2] == pytest.approx(0.9)
+
+
 def test_extract_violations_returns_zero_for_video_without_detections(
     tmp_db: Database, tmp_path: Path
 ) -> None:
