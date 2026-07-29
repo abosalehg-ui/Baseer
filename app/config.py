@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic import Field
@@ -77,6 +78,12 @@ class AppSettings(BaseSettings):
 
     cuda_device: int = Field(default=0)
 
+    # الخصوصية والتصدير
+    # ملح تجهيل أرقام اللوحات — تغييره يفصل رموز دراسة عن أخرى
+    anon_salt: str = Field(default="baseer-default-salt")
+    # مسار خط عربي بديل لتقارير PDF (فارغ = الخط المُرفَق في assets/fonts/)
+    pdf_font: str = Field(default="")
+
 
 class CvatSettings(BaseSettings):
     """إعدادات تكامل CVAT (تُقرأ بدون البادئة)."""
@@ -90,17 +97,40 @@ class CvatSettings(BaseSettings):
 
     cvat_url: str = Field(default="http://localhost:8080")
     cvat_username: str = Field(default="admin")
-    cvat_password: str = Field(default="")
+    # ملاحظة: لا حقل لكلمة المرور عمداً. التطبيق يفتح CVAT في المتصفح فقط،
+    # فحقل سرّ موثَّق ولا يستهلكه أي كود يدعو المستخدم لكتابة كلمة مرور
+    # بنص عادي بلا فائدة. عند إضافة تكامل REST تُقرأ من keyring نظام التشغيل.
 
 
-def get_settings() -> AppSettings:
-    """يعيد إعدادات التطبيق الأساسية."""
+@lru_cache(maxsize=1)
+def _cached_settings() -> AppSettings:
     return AppSettings()
 
 
-def get_cvat_settings() -> CvatSettings:
-    """يعيد إعدادات تكامل CVAT."""
+@lru_cache(maxsize=1)
+def _cached_cvat_settings() -> CvatSettings:
     return CvatSettings()
+
+
+def get_settings() -> AppSettings:
+    """يعيد إعدادات التطبيق الأساسية (مُخزَّنة مؤقتاً).
+
+    كانت تُنشئ `AppSettings()` جديدة في كل استدعاء — أي إعادة قراءة وتحليل
+    لملف `.env` من القرص في مُنشئ كل خدمة وكل عنصر واجهة. الإعدادات ثابتة
+    طوال عمر العملية، فنقرأها مرة واحدة. للاختبارات: `reset_settings_cache()`.
+    """
+    return _cached_settings()
+
+
+def get_cvat_settings() -> CvatSettings:
+    """يعيد إعدادات تكامل CVAT (مُخزَّنة مؤقتاً)."""
+    return _cached_cvat_settings()
+
+
+def reset_settings_cache() -> None:
+    """يُفرّغ ذاكرة الإعدادات — للاختبارات التي تُعدّل متغيرات البيئة."""
+    _cached_settings.cache_clear()
+    _cached_cvat_settings.cache_clear()
 
 
 def ensure_directories(settings: AppSettings | None = None) -> None:

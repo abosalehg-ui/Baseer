@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import html
 import logging
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QDragEnterEvent, QDropEvent
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -23,12 +24,16 @@ from PyQt6.QtWidgets import (
 )
 
 from app.constants import SOURCE_ARABIC_NAMES, SourceType
-from app.core.library import ImportReport, LibraryService
+from app.core.library import ImportReport, LibraryService, VideoDetails
 from app.ui.widgets.thumbnail_grid import ThumbnailGrid, VideoCard
 from app.ui.widgets.video_player import VideoPlayer
 from app.workers.import_worker import ImportWorker
+from app.workers.runner import ThreadHandle, run_worker
 
 logger = logging.getLogger(__name__)
+
+# مهلة تجميع ضغطات المفاتيح قبل إعادة البحث (ms)
+SEARCH_DEBOUNCE_MS = 250
 
 
 class LibraryView(QWidget):
@@ -39,8 +44,12 @@ class LibraryView(QWidget):
     ) -> None:
         super().__init__(parent)
         self._service = service or LibraryService()
-        self._import_thread: QThread | None = None
-        self._import_worker: ImportWorker | None = None
+        self._import: ThreadHandle | None = None
+        # مؤقّت تجميع: البحث كان يعيد بناء الشبكة كاملة عند كل حرف
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(SEARCH_DEBOUNCE_MS)
+        self._search_timer.timeout.connect(self.refresh)
         self._build_ui()
         self.setAcceptDrops(True)
         self.refresh()
@@ -71,9 +80,15 @@ class LibraryView(QWidget):
         self._status_label = QLabel("جاهز", self)
         self._progress = QProgressBar(self)
         self._progress.setVisible(False)
+        self._cancel_btn = QPushButton("إيقاف", self)
+        self._cancel_btn.setToolTip("إيقاف الاستيراد بعد الملف الحالي")
+        self._cancel_btn.setAccessibleName("إيقاف الاستيراد")
+        self._cancel_btn.setVisible(False)
+        self._cancel_btn.clicked.connect(self._on_cancel_import)
         bar = QHBoxLayout()
         bar.addWidget(self._status_label, stretch=1)
         bar.addWidget(self._progress, stretch=2)
+        bar.addWidget(self._cancel_btn)
         root.addLayout(bar)
 
     def _build_toolbar(self) -> QToolBar:
@@ -125,7 +140,9 @@ class LibraryView(QWidget):
         layout.addWidget(QLabel("بحث:", self))
         self._search_box = QLineEdit(self)
         self._search_box.setPlaceholderText("اسم الملف...")
-        self._search_box.textChanged.connect(self.refresh)
+        self._search_box.setAccessibleName("البحث في المكتبة باسم الملف")
+        self._search_box.setClearButtonEnabled(True)
+        self._search_box.textChanged.connect(self._on_search_changed)
         layout.addWidget(self._search_box, stretch=1)
 
         layout.addWidget(QLabel("المصدر:", self))
@@ -193,7 +210,7 @@ class LibraryView(QWidget):
     # تنفيذ الاستيراد في thread
     # ============================================
     def _start_import(self, paths: list[Path], source: SourceType) -> None:
-        if self._import_thread is not None and self._import_thread.isRunning():
+        if self._import is not None and self._import.is_running():
             QMessageBox.information(
                 self, "استيراد قيد التنفيذ", "جارٍ استيراد عملية أخرى — انتظر انتهاءها."
             )
@@ -203,26 +220,24 @@ class LibraryView(QWidget):
 
         self._progress.setVisible(True)
         self._progress.setRange(0, 0)
+        self._cancel_btn.setVisible(True)
+        self._cancel_btn.setEnabled(True)
         label = paths[0].name if len(paths) == 1 else f"{len(paths)} عناصر"
         self._status_label.setText(f"جارٍ استيراد {label}...")
 
-        thread = QThread(self)
-        worker = ImportWorker(paths, source, service=self._service)
-        worker.moveToThread(thread)
+        self._import = run_worker(
+            ImportWorker(paths, source, service=self._service),
+            parent=self,
+            on_finished=self._on_import_finished,
+            on_failed=self._on_import_failed,
+            signal_bindings={"progress": self._on_import_progress},
+        )
 
-        thread.started.connect(worker.run)
-        worker.progress.connect(self._on_import_progress)
-        worker.finished.connect(self._on_import_finished)
-        worker.failed.connect(self._on_import_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-
-        self._import_thread = thread
-        self._import_worker = worker
-        thread.start()
+    def _on_cancel_import(self) -> None:
+        """يطلب إيقاف الاستيراد — يتوقف بعد الملف الجاري بتقرير جزئي."""
+        if self._import is not None and self._import.cancel():
+            self._cancel_btn.setEnabled(False)
+            self._status_label.setText("جارٍ الإيقاف بعد الملف الحالي...")
 
     def _on_import_progress(self, current: int, total: int, filename: str) -> None:
         self._progress.setRange(0, total)
@@ -231,18 +246,24 @@ class LibraryView(QWidget):
 
     def _on_import_finished(self, report: ImportReport) -> None:
         self._progress.setVisible(False)
-        self._status_label.setText(
-            f"اكتمل: {len(report.imported)} مُستورد، "
-            f"{len(report.duplicates)} مكرر، {len(report.failed)} فاشل"
-        )
-        self._import_thread = None
-        self._import_worker = None
+        self._cancel_btn.setVisible(False)
+        self._import = None
 
         # تشخيص واضح لو كل الملفات فشلت
         if report.failed and not report.imported and not report.duplicates:
             self._show_failure_diagnosis(report)
 
+        # نُحدّث الشبكة أولاً ثم نكتب ملخّص الاستيراد: `refresh()` يكتب في نفس
+        # الـlabel، فترتيبه بعد الملخّص كان يدهسه قبل أن يقرأه المستخدم.
         self.refresh()
+        prefix = "أُلغي الاستيراد" if report.cancelled else "اكتمل"
+        summary = (
+            f"{prefix}: {len(report.imported)} مُستورد، "
+            f"{len(report.duplicates)} مكرر، {len(report.failed)} فاشل"
+        )
+        if report.cancelled and report.skipped:
+            summary += f"، {len(report.skipped)} لم يُعالَج"
+        self._status_label.setText(summary)
 
     def _show_failure_diagnosis(self, report: ImportReport) -> None:
         """يعرض رسالة تشخيص مفصّلة لو الاستيراد فشل بالكامل."""
@@ -259,7 +280,7 @@ class LibraryView(QWidget):
                 "<b>طريقة التثبيت السريعة (PowerShell):</b><br>"
                 "<code>winget install --id Gyan.FFmpeg</code><br><br>"
                 "بعد التثبيت، أغلق التطبيق وأعد فتح PowerShell ثم شغّله من جديد.<br><br>"
-                "تفاصيل أول خطأ:<br><i>" + first_error[:200] + "</i>",
+                "تفاصيل أول خطأ:<br><i>" + html.escape(first_error[:200]) + "</i>",
             )
         else:
             QMessageBox.warning(
@@ -270,20 +291,27 @@ class LibraryView(QWidget):
 
     def _on_import_failed(self, message: str) -> None:
         self._progress.setVisible(False)
+        self._cancel_btn.setVisible(False)
         self._status_label.setText("فشل الاستيراد")
         QMessageBox.critical(self, "خطأ في الاستيراد", message)
-        self._import_thread = None
-        self._import_worker = None
+        self._import = None
 
     # ============================================
     # العرض والمعاينة
     # ============================================
+    def _on_search_changed(self) -> None:
+        """يؤجّل البحث بدل تنفيذه على كل ضغطة مفتاح."""
+        self._search_timer.start()
+
     def refresh(self) -> None:
         """يعيد تحميل الشبكة وفق الفلاتر الحالية."""
+        self._search_timer.stop()
         source_filter = self._filter_source.currentData()
-        search = self._search_box.text().strip().lower()
+        search = self._search_box.text().strip()
 
-        rows = self._service.list_videos(source_type=source_filter)
+        # الفلترة تجري في SQL: جلب كل الصفوف ثم تصفيتها في Python كان يسحب
+        # المكتبة كاملة من القاعدة عند كل حرف.
+        rows = self._service.list_videos(source_type=source_filter, search=search or None)
         cards = [
             VideoCard(
                 video_id=int(r[0]),
@@ -293,37 +321,48 @@ class LibraryView(QWidget):
                 thumbnail_path=str(r[5]) if r[5] is not None else None,
             )
             for r in rows
-            if not search or search in str(r[1]).lower()
         ]
         self._grid.set_cards(cards)
         total = self._service.count_videos()
         total_duration = self._service.total_duration_seconds()
+        shown = f"{len(cards)} من {total}" if len(cards) != total else str(total)
         self._status_label.setText(
-            f"إجمالي المقاطع: {total} — مجموع المدة: {total_duration / 60:.1f} دقيقة"
+            f"المقاطع المعروضة: {shown} — مجموع المدة: {total_duration / 60:.1f} دقيقة"
         )
 
     def _on_card_activated(self, video_id: int) -> None:
-        row = self._service.get_video(video_id)
-        if not row:
+        details = self._service.get_video_details(video_id)
+        if details is None:
             return
-        filepath = row[1]
-        self._player.load(filepath)
-        self._details_label.setText(self._format_details(row))
+        self._player.load(details.filepath)
+        self._details_label.setText(self._format_details(details))
 
     @staticmethod
-    def _format_details(row: tuple) -> str:
-        cols = [
-            ("المعرّف", row[0]),
-            ("الاسم", row[2]),
-            ("المصدر", row[3]),
-            ("المدة (ثانية)", row[4]),
-            ("الأبعاد", f"{row[5]}×{row[6]}" if row[5] and row[6] else "—"),
-            ("FPS", row[7]),
-            ("الترميز", row[8]),
-            ("الحجم (م.ب)", row[9]),
-            ("تاريخ التسجيل", row[12]),
-            ("تاريخ الاستيراد", row[13]),
-            ("الحالة", row[18]),
+    def _format_details(details: VideoDetails) -> str:
+        """يبني جدول التفاصيل — كل قيمة **مهروبة** قبل حقنها في HTML.
+
+        اسم ملف مثل `<img src=x>` أو `</b><a href="...">` كان يُرندر كوسم فعلي
+        في الـQLabel. المصدر (نظام الملفات) غير موثوق فيُهرَّب دائماً.
+        """
+        dimensions = (
+            f"{details.width}×{details.height}" if details.width and details.height else None
+        )
+        rows: list[tuple[str, object | None]] = [
+            ("المعرّف", details.id),
+            ("الاسم", details.filename),
+            ("المصدر", details.source_type),
+            ("المدة (ثانية)", details.duration_sec),
+            ("الأبعاد", dimensions),
+            ("FPS", details.fps),
+            ("الترميز", details.codec),
+            ("الحجم (م.ب)", details.file_size_mb),
+            ("تاريخ التسجيل", details.recorded_at),
+            ("تاريخ الاستيراد", details.imported_at),
+            ("الحالة", details.status),
         ]
-        lines = [f"<b>{label}:</b> {value if value is not None else '—'}" for label, value in cols]
+        lines = [
+            f"<b>{html.escape(label)}:</b> "
+            f"{html.escape(str(value)) if value is not None else '—'}"
+            for label, value in rows
+        ]
         return "<br>".join(lines)

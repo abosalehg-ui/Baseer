@@ -176,10 +176,13 @@ def test_perceptual_duplicate_is_not_auto_dropped(tmp_path: Path, service: Libra
     a.write_bytes(b"AAAA" * 512)  # محتوى ثنائي مختلف
     b.write_bytes(b"BBBB" * 512)
 
+    # phash سداسي عشري واقعي (16×16 بت = 64 محرف hex)
+    shared_phash = "a1b2c3d4e5f60718" * 4
+
     with (
         patch("app.core.library.extract_metadata", side_effect=_fake_meta),
         patch("app.core.library.generate_thumbnail", side_effect=lambda *args, **kw: args[1]),
-        patch("app.core.library.perceptual_hash_from_image_path", return_value="same" * 16),
+        patch("app.core.library.perceptual_hash_from_image_path", return_value=shared_phash),
     ):
         r1 = service.import_path(a, SourceType.CCTV)
         r2 = service.import_path(b, SourceType.CCTV)
@@ -191,6 +194,66 @@ def test_perceptual_duplicate_is_not_auto_dropped(tmp_path: Path, service: Libra
     # phash المشترك يظهر كمجموعة تكرار حسّي للمراجعة البشرية
     groups = service.detect_duplicates()
     assert any(g.match_type == "perceptual" for g in groups)
+
+
+def test_near_duplicate_phash_is_grouped_by_hamming_distance(
+    tmp_path: Path, service: LibraryService
+) -> None:
+    """مقطعان بـphash **متقارب لا متطابق** يُجمَّعان كتكرار حسّي.
+
+    حارس ضد نكوص: التجميع كان بالتساوي التام (`GROUP BY phash`)، فنسختان من
+    نفس المقطع بترميز مختلف — وهي الحالة التي وُجدت الميزة من أجلها — لا
+    تُلتقطان أبداً لأن الـphash يتقارب ولا يتطابق.
+    """
+    base = "a1b2c3d4e5f60718" * 4
+    # يختلف في محرف واحد → 1–4 بت فقط، أقل بكثير من العتبة
+    near = base[:-1] + "9"
+    far = "ffffffffffffffff" * 4  # مختلف تماماً
+
+    hashes = iter([base, near, far])
+    files = []
+    for i in range(3):
+        f = tmp_path / f"clip{i}.mp4"
+        f.write_bytes(bytes([i]) * 2048)  # محتوى ثنائي مختلف
+        files.append(f)
+
+    with (
+        patch("app.core.library.extract_metadata", side_effect=_fake_meta),
+        patch("app.core.library.generate_thumbnail", side_effect=lambda *args, **kw: args[1]),
+        patch(
+            "app.core.library.perceptual_hash_from_image_path",
+            side_effect=lambda *_a, **_kw: next(hashes),
+        ),
+    ):
+        for f in files:
+            service.import_path(f, SourceType.CCTV)
+
+    groups = service.detect_duplicates()
+    perceptual = [g for g in groups if g.match_type == "perceptual"]
+    assert len(perceptual) == 1
+    # المجموعة تضم المتقاربَين فقط، والمقطع البعيد خارجها
+    assert len(perceptual[0].duplicate_ids) == 1
+    members = {perceptual[0].representative_id, *perceptual[0].duplicate_ids}
+    assert len(members) == 2
+
+
+def test_detect_duplicates_ignores_malformed_phash(tmp_path: Path, service: LibraryService) -> None:
+    """phash تالف (غير سداسي عشري) يُتخطّى بدل إسقاط الفحص كله."""
+    hashes = iter(["not-a-hex-value", "a1b2c3d4e5f60718" * 4])
+    for i in range(2):
+        f = tmp_path / f"bad{i}.mp4"
+        f.write_bytes(bytes([i + 10]) * 2048)
+        with (
+            patch("app.core.library.extract_metadata", side_effect=_fake_meta),
+            patch("app.core.library.generate_thumbnail", side_effect=lambda *args, **kw: args[1]),
+            patch(
+                "app.core.library.perceptual_hash_from_image_path",
+                side_effect=lambda *_a, **_kw: next(hashes),
+            ),
+        ):
+            service.import_path(f, SourceType.CCTV)
+
+    assert service.detect_duplicates() == []  # لا انهيار ولا مجموعات كاذبة
 
 
 def test_import_multiple_paths_imports_all(tmp_path: Path, service: LibraryService) -> None:

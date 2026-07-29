@@ -1,9 +1,15 @@
-"""widgets رسوم بيانية بـ PyQtGraph للداشبورد."""
+"""widgets رسوم بيانية بـ PyQtGraph للداشبورد.
+
+خلفية الرسوم تتبع لوحة الثيم بدل فرض الأبيض دائماً: على ويندوز بثيم داكن كان
+الداشبورد يعرض رسوماً بيضاء ساطعة وسط واجهة داكنة.
+"""
 
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
+
+from app.ui import theme
 
 
 def _bar_widget_or_label(title: str, data: list[tuple[str, int]], parent: QWidget) -> QWidget:
@@ -19,7 +25,7 @@ def _bar_widget_or_label(title: str, data: list[tuple[str, int]], parent: QWidge
     if not data:
         empty = QLabel("لا توجد بيانات", container)
         empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.setStyleSheet("color: #888;")
+        empty.setProperty("role", "muted")
         layout.addWidget(empty)
         return container
 
@@ -31,13 +37,15 @@ def _bar_widget_or_label(title: str, data: list[tuple[str, int]], parent: QWidge
             layout.addWidget(QLabel(f"  • {label}: {value}", container))
         return container
 
+    palette = theme.active_palette()
     plot = pg.PlotWidget(parent=container)
-    plot.setBackground("w")
+    plot.setBackground(palette.plot_bg)
+    _style_axes(plot, palette)
     labels = [d[0] for d in data]
     values = [d[1] for d in data]
     x = list(range(len(labels)))
 
-    bar = pg.BarGraphItem(x=x, height=values, width=0.6, brush="#2c3e50")
+    bar = pg.BarGraphItem(x=x, height=values, width=0.6, brush=palette.primary)
     plot.addItem(bar)
     plot.getAxis("bottom").setTicks([list(zip(x, labels, strict=False))])
     plot.setMinimumHeight(220)
@@ -64,7 +72,7 @@ def make_line_chart(
     if not points:
         empty = QLabel("لا توجد بيانات", container)
         empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.setStyleSheet("color: #888;")
+        empty.setProperty("role", "muted")
         layout.addWidget(empty)
         return container
 
@@ -75,11 +83,13 @@ def make_line_chart(
             layout.addWidget(QLabel(f"  • {x}: {y}", container))
         return container
 
+    palette = theme.active_palette()
     plot = pg.PlotWidget(parent=container)
-    plot.setBackground("w")
+    plot.setBackground(palette.plot_bg)
+    _style_axes(plot, palette)
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
-    plot.plot(xs, ys, pen=pg.mkPen("#1abc9c", width=2), symbol="o")
+    plot.plot(xs, ys, pen=pg.mkPen(palette.info, width=2), symbol="o")
     plot.setMinimumHeight(220)
     layout.addWidget(plot)
     return container
@@ -102,7 +112,7 @@ def make_heatmap(
     if not matrix or not matrix[0]:
         empty = QLabel("لا توجد بيانات", container)
         empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        empty.setStyleSheet("color: #888;")
+        empty.setProperty("role", "muted")
         layout.addWidget(empty)
         return container
 
@@ -127,6 +137,17 @@ def make_heatmap(
         layout.addWidget(QLabel(f"الأعمدة: {', '.join(map(str, col_labels))}", container))
 
     return container
+
+
+def _style_axes(plot: object, palette: theme.Palette) -> None:
+    """يلوّن محاور الرسم بلون نص الثيم حتى تبقى مقروءة في الوضعين."""
+    for axis_name in ("bottom", "left"):
+        try:
+            axis = plot.getAxis(axis_name)
+            axis.setPen(palette.plot_fg)
+            axis.setTextPen(palette.plot_fg)
+        except Exception:  # noqa: BLE001
+            continue
 
 
 __all__ = ["make_bar_chart", "make_heatmap", "make_line_chart"]

@@ -11,6 +11,7 @@ from PyQt6.QtCore import QPoint, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import QWidget
 
+from app.ui import theme
 from app.utils.geometry import Point
 
 
@@ -97,7 +98,7 @@ class FrameCanvas(QWidget):
 
     def paintEvent(self, _event: object) -> None:  # noqa: N802
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor("#202020"))
+        painter.fillRect(self.rect(), QColor(theme.active_palette().canvas_bg))
         if not self._image.isNull():
             off_x, off_y, scale, _ = self._display_rect()
             scaled = QPixmap.fromImage(self._image).scaled(
@@ -111,7 +112,7 @@ class FrameCanvas(QWidget):
         painter.end()
 
     def _draw_points(self, painter: QPainter, off_x: float, off_y: float, scale: float) -> None:
-        pen = QPen(QColor("#e74c3c"))
+        pen = QPen(QColor(theme.active_palette().danger))
         pen.setWidth(2)
         painter.setPen(pen)
         widget_pts = [

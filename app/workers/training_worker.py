@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from app.core.trainer import EpochMetrics, TrainConfig, TrainerService, TrainResult
 
@@ -45,34 +45,4 @@ class TrainingWorker(QObject):
         self.epoch_done.emit(metrics)
 
 
-def start_training_in_thread(
-    config: TrainConfig,
-    *,
-    on_epoch: object = None,
-    on_finished: object = None,
-    on_failed: object = None,
-) -> tuple[QThread, TrainingWorker]:
-    """يبدأ التدريب في QThread جديد ويعيد (thread, worker)."""
-    thread = QThread()
-    worker = TrainingWorker(config)
-    worker.moveToThread(thread)
-
-    thread.started.connect(worker.run)
-    worker.finished.connect(thread.quit)
-    worker.failed.connect(thread.quit)
-    worker.finished.connect(worker.deleteLater)
-    worker.failed.connect(worker.deleteLater)
-    thread.finished.connect(thread.deleteLater)
-
-    if on_epoch is not None:
-        worker.epoch_done.connect(on_epoch)
-    if on_finished is not None:
-        worker.finished.connect(on_finished)
-    if on_failed is not None:
-        worker.failed.connect(on_failed)
-
-    thread.start()
-    return thread, worker
-
-
-__all__ = ["TrainingWorker", "TrainResult", "start_training_in_thread"]
+__all__ = ["TrainingWorker", "TrainResult"]

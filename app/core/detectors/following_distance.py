@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.constants import ViolationType
 from app.core.analyzer import Detection
-from app.core.rules import BaseViolationDetector, Track, ViolationCandidate, Zone
+from app.core.violations import BaseViolationDetector, Track, ViolationCandidate, Zone
 from app.utils.geometry import speed_from_centers_kmh
 
 VEHICLE_CLASSES = ("vehicle", "motorcycle")
@@ -52,13 +52,19 @@ class FollowingDistanceDetector(BaseViolationDetector):
         if len(vehicle_tracks) < 2:
             return []
 
+        # فهرسة مكانية: المقارنة الكاملة (كل زوج) كانت O(n²) — 200 track = 40,000
+        # فحص، كلٌّ يبني قاموسين ويفرز ثلاث قوائم. المركبتان لا تكونان في نفس
+        # المسار إلا إذا تقارب مركزاهما أفقياً، فنُوزّع الـtracks على «سلال x»
+        # بعرض عتبة المسار ونقارن داخل السلة وجارتيها فقط.
+        buckets = self._bucket_by_x(vehicle_tracks)
+
         violations: list[ViolationCandidate] = []
         seen_followers: set[int] = set()
 
         for follower in vehicle_tracks:
             if follower.track_id in seen_followers:
                 continue
-            for leader in vehicle_tracks:
+            for leader in self._candidate_leaders(follower, buckets):
                 if leader.track_id == follower.track_id:
                     continue
                 pair_violation = self._check_pair(
@@ -69,6 +75,29 @@ class FollowingDistanceDetector(BaseViolationDetector):
                     seen_followers.add(follower.track_id)
                     break
         return violations
+
+    def _bucket_key(self, track: Track) -> int:
+        """رقم السلة الأفقية للـtrack (متوسط مركز x ÷ عرض العتبة)."""
+        xs = [(d.bbox[0] + d.bbox[2]) / 2 for d in track.detections]
+        mean_x = sum(xs) / len(xs)
+        return int(mean_x // self._same_lane_x_tolerance_px)
+
+    def _bucket_by_x(self, tracks: list[Track]) -> dict[int, list[Track]]:
+        buckets: dict[int, list[Track]] = {}
+        for t in tracks:
+            buckets.setdefault(self._bucket_key(t), []).append(t)
+        return buckets
+
+    def _candidate_leaders(self, follower: Track, buckets: dict[int, list[Track]]) -> list[Track]:
+        """المركبات التي قد تكون في نفس مسار `follower` — سلته وجارتاها.
+
+        الجارتان ضروريتان لأن مركبتين متقاربتين فعلاً قد تقعان على حدّي سلتين.
+        """
+        key = self._bucket_key(follower)
+        out: list[Track] = []
+        for k in (key - 1, key, key + 1):
+            out.extend(buckets.get(k, ()))
+        return out
 
     def _check_pair(
         self, *, leader: Track, follower: Track, fps: float

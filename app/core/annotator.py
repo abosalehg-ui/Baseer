@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import AppSettings, get_cvat_settings, get_settings
@@ -45,7 +45,7 @@ def build_cvat_xml(
     ET.SubElement(task, "name").text = task_name
     ET.SubElement(task, "size").text = str(len(detections_per_frame))
     ET.SubElement(task, "mode").text = "annotation"
-    ET.SubElement(task, "created").text = datetime.now(UTC).isoformat()
+    ET.SubElement(task, "created").text = datetime.now(timezone.utc).isoformat()
 
     labels_el = ET.SubElement(task, "labels")
     for name in labels:

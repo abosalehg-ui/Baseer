@@ -194,7 +194,7 @@ class OCRService:
         if self._paddle_engine is not None:
             return self._paddle_engine
         try:
-            from paddleocr import PaddleOCR  # type: ignore
+            from paddleocr import PaddleOCR
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("يحتاج paddleocr — ثبّت requirements.txt") from exc
         self._paddle_engine = PaddleOCR(

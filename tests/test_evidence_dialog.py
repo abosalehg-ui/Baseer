@@ -58,17 +58,47 @@ def test_extract_evidence_images_uses_provider_and_closes() -> None:
         holder["p"] = p
         return p
 
-    imgs = extract_evidence_images("/v/a.mp4", [0, 2, 4], provider_factory=_factory)
-    assert len(imgs) == 3
-    assert all(im.shape == (40, 60, 3) for im in imgs)
+    pairs = extract_evidence_images("/v/a.mp4", [0, 2, 4], provider_factory=_factory)
+    assert [f for f, _ in pairs] == [0, 2, 4]
+    assert all(im.shape == (40, 60, 3) for _, im in pairs)
     assert holder["p"].closed is True
 
 
 def test_extract_evidence_images_respects_max() -> None:
-    imgs = extract_evidence_images(
+    pairs = extract_evidence_images(
         "/v/a.mp4", list(range(20)), provider_factory=lambda p: _FakeProvider(p), max_frames=3
     )
-    assert len(imgs) == 3
+    assert len(pairs) == 3
+
+
+def test_extract_evidence_images_keeps_frame_numbers_aligned_on_failure() -> None:
+    """الإطارات الفاشلة تُسقَط **مع رقمها** — لا تنزاح الصور على أرقام غيرها.
+
+    حارس ضد نكوص: قبل الإصلاح كانت الدالة تُعيد الصور وحدها ويُزاوجها المتصل
+    بأرقام الإطارات بالترتيب، فصورة الإطار 250 تُعرض معنونة «إطار 100».
+    """
+
+    class _FlakyProvider:
+        """يفشل في قراءة الإطار 100 وينجح في البقية."""
+
+        def __init__(self, _path: str) -> None:
+            pass
+
+        def get_frame(self, frame_no: int):
+            if frame_no == 100:
+                return None
+            return np.full((10, 10, 3), frame_no % 255, dtype=np.uint8)
+
+        def close(self) -> None:
+            pass
+
+    pairs = extract_evidence_images(
+        "/v/a.mp4", [100, 250, 400], provider_factory=lambda p: _FlakyProvider(p)
+    )
+    assert [f for f, _ in pairs] == [250, 400]
+    # كل صورة تحمل قيمة مشتقة من رقم إطارها الحقيقي
+    for frame_no, img in pairs:
+        assert int(img[0, 0, 0]) == frame_no % 255
 
 
 def _seed_violation(db: Database) -> int:

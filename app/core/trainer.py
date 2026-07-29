@@ -139,7 +139,7 @@ class TrainerService:
         if not path.exists():
             raise FileNotFoundError(f"النموذج غير موجود: {path}")
         try:
-            from ultralytics import YOLO  # type: ignore
+            from ultralytics import YOLO
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("يحتاج ultralytics — ثبّت requirements.txt") from exc
         model = YOLO(str(path))
@@ -215,7 +215,7 @@ def _default_train(
 ) -> TrainResult:
     """مغلّف ultralytics.train — يُستدعى عند الاستخدام الحقيقي فقط."""
     try:
-        from ultralytics import YOLO  # type: ignore
+        from ultralytics import YOLO
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("يحتاج ultralytics — ثبّت requirements.txt") from exc
 
@@ -287,7 +287,7 @@ def _attach_progress_callback(
 def _default_evaluate(model_path: Path, dataset_yaml: Path) -> EvalReport:
     """تقييم النموذج عبر ultralytics."""
     try:
-        from ultralytics import YOLO  # type: ignore
+        from ultralytics import YOLO
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("يحتاج ultralytics — ثبّت requirements.txt") from exc
 

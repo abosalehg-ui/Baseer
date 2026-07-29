@@ -22,6 +22,15 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.core.calibration import CalibrationService  # noqa: E402
+from app.core.library import LibraryService  # noqa: E402
+
+
+def _require_video(video_id: int) -> bool:
+    """يتحقق من وجود المقطع قبل الكتابة — بدله يفشل القيد المرجعي برسالة تقنية."""
+    if LibraryService().get_video_details(video_id) is None:
+        print(f"✗ لا يوجد مقطع بالمعرّف {video_id} في القاعدة", file=sys.stderr)
+        return False
+    return True
 
 
 def _pairs(flat: list[float]) -> list[tuple[float, float]]:

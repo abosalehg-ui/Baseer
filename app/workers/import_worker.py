@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from app.constants import SourceType
 from app.core.library import ImportReport, LibraryService
@@ -49,51 +49,17 @@ class ImportWorker(QObject):
                 self._source_type,
                 generate_thumbnails=self._generate_thumbnails,
                 progress_cb=self._on_progress,
+                should_stop=lambda: self._cancelled,
             )
+            # الإلغاء ينتهي بـ`finished` مع تقرير جزئي (report.cancelled=True)
+            # لا بـ`failed` — إيقاف المستخدم لعملية ليس خطأً.
             self.finished.emit(report)
         except Exception as exc:  # noqa: BLE001
             logger.exception("فشل عامل الاستيراد")
             self.failed.emit(str(exc))
 
     def _on_progress(self, current: int, total: int, filename: str) -> None:
-        if self._cancelled:
-            raise InterruptedError("أُلغيت العملية من قبل المستخدم")
         self.progress.emit(current, total, filename)
 
 
-def start_import_in_thread(
-    path: Path,
-    source_type: SourceType,
-    *,
-    generate_thumbnails: bool = True,
-    on_progress: object = None,
-    on_finished: object = None,
-    on_failed: object = None,
-) -> tuple[QThread, ImportWorker]:
-    """يبدأ عملية استيراد في QThread جديد ويعيد (thread, worker).
-
-    على المستدعي الاحتفاظ بمراجع `thread` و `worker` حتى لا يُجمع garbage collector.
-    """
-    thread = QThread()
-    worker = ImportWorker(path, source_type, generate_thumbnails=generate_thumbnails)
-    worker.moveToThread(thread)
-
-    thread.started.connect(worker.run)
-    worker.finished.connect(thread.quit)
-    worker.failed.connect(thread.quit)
-    worker.finished.connect(worker.deleteLater)
-    worker.failed.connect(worker.deleteLater)
-    thread.finished.connect(thread.deleteLater)
-
-    if on_progress is not None:
-        worker.progress.connect(on_progress)
-    if on_finished is not None:
-        worker.finished.connect(on_finished)
-    if on_failed is not None:
-        worker.failed.connect(on_failed)
-
-    thread.start()
-    return thread, worker
-
-
-__all__ = ["ImportReport", "ImportWorker", "start_import_in_thread"]
+__all__ = ["ImportReport", "ImportWorker"]

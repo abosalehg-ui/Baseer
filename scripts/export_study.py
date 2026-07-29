@@ -12,12 +12,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.core.dashboard import DashboardService  # noqa: E402
 from app.core.exporter import (  # noqa: E402
+    anonymize_violation_rows,
     build_study,
     export_csv,
     export_excel,
     export_json,
     export_pdf,
-    record_export,
 )
 
 
@@ -36,15 +36,26 @@ def main() -> int:
         help="مجلد الإخراج",
     )
     parser.add_argument("--name", default="baseer_study", help="اسم الدراسة")
+    parser.add_argument(
+        "--with-plates",
+        action="store_true",
+        help="تصدير أرقام اللوحات كما هي (الافتراضي: مجهّلة برموز مستعارة)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
     args.output.mkdir(parents=True, exist_ok=True)
 
     service = DashboardService()
-    study = build_study(service)
+    # التجهيل هو الافتراضي: الدراسة الإحصائية لا تحتاج أرقام لوحات، وتصديرها
+    # يجعل الملف سجلاً شخصياً. `--with-plates` قرار صريح من المستخدم.
+    anonymize = not args.with_plates
+    study = build_study(service, anonymize=anonymize)
     violations = service.list_violations()
-    print(f"📊 {len(violations)} مخالفة في القاعدة")
+    if anonymize:
+        violations = anonymize_violation_rows(violations)
+    mode = "مجهّلة" if anonymize else "بأرقام لوحات كاملة ⚠️"
+    print(f"📊 {len(violations)} مخالفة في القاعدة — {mode}")
 
     formats = ("json", "csv", "xlsx", "pdf") if args.format == "all" else (args.format,)
     out_paths: list[Path] = []
@@ -62,12 +73,7 @@ def main() -> int:
                 export_pdf(study, violations, out)
             print(f"✔ {fmt}: {out}")
             out_paths.append(out)
-            record_export(
-                service._db,  # noqa: SLF001
-                study_name=args.name,
-                fmt=fmt,
-                output_path=out,
-            )
+            service.record_export_entry(study_name=args.name, fmt=fmt, output_path=out)
         except Exception as exc:  # noqa: BLE001
             print(f"✗ {fmt} فشل: {exc}", file=sys.stderr)
 

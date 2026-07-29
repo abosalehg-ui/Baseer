@@ -6,12 +6,15 @@ import logging
 from pathlib import Path
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QResizeEvent
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
@@ -24,20 +27,27 @@ from PyQt6.QtWidgets import (
 
 from app.config import get_settings
 from app.constants import VIOLATION_ARABIC_NAMES, ReviewStatus, ViolationType
-from app.core.dashboard import DashboardService
+from app.core.dashboard import DashboardKPIs, DashboardService
 from app.core.exporter import (
+    anonymize_violation_rows,
     build_study,
     export_csv,
     export_excel,
     export_json,
     export_pdf,
-    record_export,
 )
+from app.ui import theme
 from app.ui.widgets.stats_charts import make_bar_chart, make_heatmap, make_line_chart
 
 logger = logging.getLogger(__name__)
 
 ARABIC_WEEKDAYS = ["الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"]
+
+# سقف صفوف الجدول — يُعرض مع الإجمالي بدل بتر صامت
+VIOLATIONS_PAGE_SIZE = 500
+
+# عدد بطاقات KPI في الصف — يُعاد حسابه حسب عرض النافذة
+KPI_CARD_MIN_WIDTH = 190
 
 
 class DashboardView(QWidget):
@@ -47,6 +57,7 @@ class DashboardView(QWidget):
         super().__init__(parent)
         self._settings = get_settings()
         self._service = DashboardService()
+        self._kpi_cards: list[QFrame] = []
         self._build_ui()
         self.refresh()
 
@@ -78,6 +89,7 @@ class DashboardView(QWidget):
         bar.addWidget(QLabel("تصدير الدراسة:", self))
 
         json_btn = QPushButton("JSON", self)
+        json_btn.setAccessibleName("تصدير الدراسة بصيغة JSON")
         json_btn.clicked.connect(lambda: self._on_export("json"))
         bar.addWidget(json_btn)
 
@@ -92,6 +104,18 @@ class DashboardView(QWidget):
         pdf_btn = QPushButton("PDF عربي", self)
         pdf_btn.clicked.connect(lambda: self._on_export("pdf"))
         bar.addWidget(pdf_btn)
+
+        # تجهيل اللوحات عند التصدير — الدراسة الإحصائية لا تحتاج أرقام لوحات،
+        # وتصديرها يجعل الملف سجلاً شخصياً يربط مركبات محدَّدة بأوقات ومواقع.
+        self._anon_check = QCheckBox("تصدير مجهّل (إخفاء أرقام اللوحات)", self)
+        self._anon_check.setChecked(True)
+        self._anon_check.setToolTip(
+            "يستبدل كل رقم لوحة برمز مستعار ثابت (PLATE-XXXXXXXXXX):\n"
+            "تبقى إحصاءات «مخالفات نفس المركبة» ممكنة بلا كشف الهوية.\n"
+            "أزل التحديد فقط عند الحاجة الفعلية للأرقام."
+        )
+        self._anon_check.setAccessibleName("تفعيل تجهيل اللوحات عند التصدير")
+        bar.addWidget(self._anon_check)
 
         bar.addStretch()
 
@@ -126,19 +150,36 @@ class DashboardView(QWidget):
         self._filter_review = QComboBox(panel)
         self._filter_review.addItem("الكل", None)
         for rs in ReviewStatus:
-            self._filter_review.addItem(rs.value, rs.value)
+            self._filter_review.addItem(_review_status_label(rs.value), rs.value)
         self._filter_review.currentIndexChanged.connect(self.refresh)
         filters.addWidget(self._filter_review)
         filters.addStretch()
         layout.addLayout(filters)
 
         # الجدول
+        self._table_caption = QLabel("", panel)
+        self._table_caption.setProperty("role", "muted")
+        layout.addWidget(self._table_caption)
+
         self._table = QTableWidget(panel)
         self._table.setColumnCount(7)
         self._table.setHorizontalHeaderLabels(
             ["المعرّف", "الملف", "النوع", "الثقة", "اللوحة", "الحالة", "أفعال"]
         )
         self._table.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._table.setAlternatingRowColors(True)
+        self._table.setAccessibleName("جدول المخالفات للمراجعة")
+        header = self._table.horizontalHeader()
+        if header is not None:
+            for col in range(self._table.columnCount()):
+                header.setSectionResizeMode(
+                    col,
+                    (
+                        QHeaderView.ResizeMode.Stretch
+                        if col in (1, 2)
+                        else QHeaderView.ResizeMode.ResizeToContents
+                    ),
+                )
         layout.addWidget(self._table, stretch=1)
 
         return panel
@@ -152,35 +193,66 @@ class DashboardView(QWidget):
         self._refresh_charts()
         self._refresh_violations()
 
-    def _refresh_kpis(self, kpis) -> None:
+    def _refresh_kpis(self, kpis: DashboardKPIs) -> None:
         # امسح القديم
         while self._kpi_grid.count():
             item = self._kpi_grid.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
+        self._kpi_cards.clear()
 
+        # الألوان من لوحة الثيم لا كـhex مكتوبة هنا، وكل تركيبة (نص/خلفية)
+        # مضبوطة لتتجاوز حد WCAG AA — أبيض على البرتقالي كان 2.2:1.
+        p = theme.active_palette()
         cards = [
-            ("إجمالي المقاطع", str(kpis.total_videos), "#3498db"),
-            ("إجمالي المخالفات", str(kpis.total_violations), "#e74c3c"),
-            ("متوسط مخالفات/مقطع", f"{kpis.avg_violations_per_video:.2f}", "#f39c12"),
-            ("أنواع المصادر", str(len(kpis.sources_breakdown)), "#2ecc71"),
+            ("إجمالي المقاطع", str(kpis.total_videos), p.primary, p.on_primary),
+            ("إجمالي المخالفات", str(kpis.total_violations), p.danger, p.on_danger),
+            (
+                "متوسط مخالفات/مقطع",
+                f"{kpis.avg_violations_per_video:.2f}",
+                p.warning,
+                p.on_warning,
+            ),
+            ("أنواع المصادر", str(len(kpis.sources_breakdown)), p.success, p.on_success),
         ]
-        for col, (title, value, color) in enumerate(cards):
-            self._kpi_grid.addWidget(self._kpi_card(title, value, color), 0, col)
+        for title, value, bg, fg in cards:
+            self._kpi_cards.append(self._kpi_card(title, value, bg, fg))
+        self._layout_kpi_cards()
 
-    def _kpi_card(self, title: str, value: str, color: str) -> QFrame:
+    def _layout_kpi_cards(self) -> None:
+        """يوزّع بطاقات KPI على صفوف حسب العرض المتاح.
+
+        كانت أربع بطاقات في صف واحد **دائماً** (`addWidget(card, 0, col)`)،
+        فتنضغط على الشاشات الضيقة حتى يُقصّ نص «متوسط مخالفات/مقطع».
+        """
+        if not self._kpi_cards:
+            return
+        available = max(self.width(), KPI_CARD_MIN_WIDTH)
+        per_row = max(1, min(len(self._kpi_cards), available // KPI_CARD_MIN_WIDTH))
+        for index, card in enumerate(self._kpi_cards):
+            self._kpi_grid.addWidget(card, index // per_row, index % per_row)
+
+    def resizeEvent(self, event: QResizeEvent | None) -> None:  # noqa: N802
+        """يعيد توزيع بطاقات KPI عند تغيّر عرض النافذة."""
+        super().resizeEvent(event)
+        if self._kpi_cards:
+            self._layout_kpi_cards()
+
+    def _kpi_card(self, title: str, value: str, background: str, foreground: str) -> QFrame:
         card = QFrame(self)
         card.setFrameShape(QFrame.Shape.StyledPanel)
-        card.setStyleSheet(
-            f"QFrame {{ background-color: {color}; color: white; border-radius: 8px; padding: 8px; }}"
-        )
+        card.setMinimumWidth(KPI_CARD_MIN_WIDTH - 20)
+        card.setStyleSheet(theme.kpi_card_style(background, foreground))
+        # قارئ الشاشة يقرأ البطاقة كوحدة واحدة ذات معنى
+        card.setAccessibleName(f"{title}: {value}")
         layout = QVBoxLayout(card)
         title_lbl = QLabel(title, card)
         title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_lbl.setStyleSheet("font-size: 12px; color: rgba(255,255,255,0.9);")
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet(f"font-size: 12px; color: {foreground};")
         value_lbl = QLabel(value, card)
         value_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        value_lbl.setStyleSheet("font-size: 26px; font-weight: bold;")
+        value_lbl.setStyleSheet(f"font-size: 26px; font-weight: bold; color: {foreground};")
         layout.addWidget(title_lbl)
         layout.addWidget(value_lbl)
         return card
@@ -228,8 +300,9 @@ class DashboardView(QWidget):
         vtype = self._filter_type.currentData()
         rstatus = self._filter_review.currentData()
         violations = self._service.list_violations(
-            violation_type=vtype, review_status=rstatus, limit=500
+            violation_type=vtype, review_status=rstatus, limit=VIOLATIONS_PAGE_SIZE
         )
+        total = self._service.count_violations(violation_type=vtype, review_status=rstatus)
         self._table.setRowCount(len(violations))
         for r, v in enumerate(violations):
             self._table.setItem(r, 0, QTableWidgetItem(str(v.id)))
@@ -237,22 +310,40 @@ class DashboardView(QWidget):
             self._table.setItem(r, 2, QTableWidgetItem(v.violation_type_ar))
             self._table.setItem(r, 3, QTableWidgetItem(f"{v.confidence:.2f}"))
             self._table.setItem(r, 4, QTableWidgetItem(v.license_plate or "—"))
-            self._table.setItem(r, 5, QTableWidgetItem(v.review_status))
+            # الحالة تُعرض بنص + رمز: الاعتماد على اللون وحده يُقصي مستخدمي
+            # عمى الألوان (≈8% من الذكور) عن التمييز بين مؤكَّدة وكاذبة.
+            self._table.setItem(r, 5, QTableWidgetItem(_review_status_label(v.review_status)))
             self._table.setCellWidget(r, 6, self._action_buttons(v.id))
-        self._table.resizeColumnsToContents()
+
+        # البتر عند 500 كان صامتاً — المستخدم يظن أن هذا كل ما لديه
+        if total > len(violations):
+            self._table_caption.setText(f"عرض {len(violations)} من {total} مخالفة (الأحدث أولاً)")
+        else:
+            self._table_caption.setText(f"{total} مخالفة")
 
     def _action_buttons(self, violation_id: int) -> QWidget:
+        """أزرار مراجعة المخالفة.
+
+        كل زر يحمل اسم وصول ووصف tooltip: أزرار برمز واحد («✓»/«✗»/«؟») بلا
+        تسمية تُقرأ لدى قارئ الشاشة كـ«علامة صح» بلا سياق. الألوان من لوحة
+        الثيم بتباين مضبوط، والهدف بعرض مريح للنقر بدل 32px.
+        """
+        p = theme.active_palette()
         container = QWidget(self)
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        for label, status, color in (
-            ("✓", ReviewStatus.CONFIRMED, "#27ae60"),
-            ("✗", ReviewStatus.FALSE_POSITIVE, "#c0392b"),
-            ("؟", ReviewStatus.UNCERTAIN, "#f39c12"),
+        layout.setSpacing(theme.SPACING_XS)
+        for label, name, status, bg, fg in (
+            ("✓", "تأكيد المخالفة", ReviewStatus.CONFIRMED, p.success, p.on_success),
+            ("✗", "وسمها إيجابية كاذبة", ReviewStatus.FALSE_POSITIVE, p.danger, p.on_danger),
+            ("؟", "وسمها غير مؤكدة", ReviewStatus.UNCERTAIN, p.warning, p.on_warning),
         ):
             btn = QPushButton(label, container)
-            btn.setStyleSheet(f"background-color: {color}; color: white; padding: 2px 6px;")
-            btn.setFixedWidth(32)
+            btn.setStyleSheet(theme.action_button_style(bg, fg))
+            btn.setMinimumWidth(theme.MIN_TOUCH_TARGET)
+            btn.setMinimumHeight(theme.MIN_TOUCH_TARGET - 6)
+            btn.setAccessibleName(f"{name} رقم {violation_id}")
+            btn.setToolTip(name)
             btn.clicked.connect(
                 lambda _checked=False, vid=violation_id, st=status: self._mark_review(vid, st)
             )
@@ -260,7 +351,9 @@ class DashboardView(QWidget):
 
         evidence_btn = QPushButton("🎬", container)
         evidence_btn.setToolTip("عرض الأدلة (إطارات + مشغّل عند وقت المخالفة)")
-        evidence_btn.setFixedWidth(32)
+        evidence_btn.setAccessibleName(f"عرض أدلة المخالفة رقم {violation_id}")
+        evidence_btn.setMinimumWidth(theme.MIN_TOUCH_TARGET)
+        evidence_btn.setMinimumHeight(theme.MIN_TOUCH_TARGET - 6)
         evidence_btn.clicked.connect(
             lambda _checked=False, vid=violation_id: self._show_evidence(vid)
         )
@@ -270,7 +363,7 @@ class DashboardView(QWidget):
     def _show_evidence(self, violation_id: int) -> None:
         from app.ui.dialogs.evidence_dialog import EvidenceDialog
 
-        dlg = EvidenceDialog(violation_id, db=self._service._db, parent=self)  # noqa: SLF001
+        dlg = EvidenceDialog(violation_id, parent=self)
         dlg.exec()
 
     def _mark_review(self, violation_id: int, status: ReviewStatus) -> None:
@@ -302,9 +395,12 @@ class DashboardView(QWidget):
             return
         out_path = Path(path_str)
 
+        anonymize = self._anon_check.isChecked()
         try:
-            study = build_study(self._service)
+            study = build_study(self._service, anonymize=anonymize)
             violations = self._service.list_violations()
+            if anonymize:
+                violations = anonymize_violation_rows(violations)
             if fmt == "json":
                 export_json(study, out_path)
             elif fmt == "csv":
@@ -313,11 +409,8 @@ class DashboardView(QWidget):
                 export_excel(study, violations, out_path)
             elif fmt == "pdf":
                 export_pdf(study, violations, out_path)
-            record_export(
-                self._service._db,  # noqa: SLF001
-                study_name=out_path.stem,
-                fmt=fmt,
-                output_path=out_path,
+            self._service.record_export_entry(
+                study_name=out_path.stem, fmt=fmt, output_path=out_path
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("فشل التصدير")
@@ -333,3 +426,16 @@ def _safe_vt(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+_REVIEW_STATUS_LABELS: dict[str, str] = {
+    ReviewStatus.PENDING.value: "⏳ بانتظار المراجعة",
+    ReviewStatus.CONFIRMED.value: "✓ مؤكَّدة",
+    ReviewStatus.FALSE_POSITIVE.value: "✗ إيجابية كاذبة",
+    ReviewStatus.UNCERTAIN.value: "؟ غير مؤكدة",
+}
+
+
+def _review_status_label(status: str) -> str:
+    """تسمية عربية + رمز لحالة المراجعة — معلومة لا تعتمد على اللون وحده."""
+    return _REVIEW_STATUS_LABELS.get(status, status)

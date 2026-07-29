@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 
 from app.core.analyzer import AnalysisConfig, AnalysisResult, AnalyzerService
 
@@ -52,35 +52,4 @@ class InferenceWorker(QObject):
             self.failed.emit(str(exc))
 
 
-def start_inference_in_thread(
-    video_ids: list[int],
-    config: AnalysisConfig,
-    *,
-    on_progress: object = None,
-    on_finished: object = None,
-    on_failed: object = None,
-) -> tuple[QThread, InferenceWorker]:
-    """يُشغّل الاستدلال في QThread ويعيد (thread, worker)."""
-    thread = QThread()
-    worker = InferenceWorker(video_ids, config)
-    worker.moveToThread(thread)
-
-    thread.started.connect(worker.run)
-    worker.finished.connect(thread.quit)
-    worker.failed.connect(thread.quit)
-    worker.finished.connect(worker.deleteLater)
-    worker.failed.connect(worker.deleteLater)
-    thread.finished.connect(thread.deleteLater)
-
-    if on_progress is not None:
-        worker.progress.connect(on_progress)
-    if on_finished is not None:
-        worker.finished.connect(on_finished)
-    if on_failed is not None:
-        worker.failed.connect(on_failed)
-
-    thread.start()
-    return thread, worker
-
-
-__all__ = ["InferenceWorker", "start_inference_in_thread"]
+__all__ = ["InferenceWorker"]

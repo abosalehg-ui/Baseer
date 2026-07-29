@@ -1,51 +1,68 @@
 # ============================================
 # بَصير | Baseer — التبعيات
 # ============================================
+# كل تبعية لها **حد أعلى** (عادةً النسخة الرئيسية التالية). بلا حدود عليا،
+# بناءان في يومين مختلفين يُنتجان تطبيقين مختلفين، ولا يمكن معرفة ما شُحن
+# في مُثبِّت مُوزَّع — وهي مشكلة سلسلة توريد قبل أن تكون مشكلة هندسية.
+#
+# للبناء القابل لإعادة الإنتاج استخدم الملف المقفول:
+#     pip install -r requirements.lock
+# ولتحديثه بعد تعديل هذا الملف:
+#     pip install pip-tools
+#     pip-compile --generate-hashes -o requirements.lock requirements.txt
 
 # AI / ML
 # ملاحظة: torch/torchvision يُثبَّتان يدوياً بفهرس CUDA (راجع README) — التثبيت من
 # PyPI هنا يسحب نسخة CPU. أبقيناهما مرجعاً للإصدار الأدنى.
-ultralytics>=8.3.0
-torch>=2.5.0
-torchvision>=0.20.0
+ultralytics>=8.3.0,<8.5          # ⚠️ AGPL-3.0 — راجع LICENSE و docs/licensing.md
+torch>=2.5.0,<3
+torchvision>=0.20.0,<1
 # opencv-python فقط — لا تُضِف opencv-contrib-python معه (يتصادمان على مساحة cv2)
-opencv-python>=4.10.0
-paddleocr>=2.8.0
-paddlepaddle-gpu>=2.6.0
-numpy>=1.26.0
+opencv-python>=4.10.0,<5
+# ⚠️ PaddleOCR 3.x أزال use_angle_cls / use_gpu / show_log ومعامل cls في .ocr()
+# التي يعتمد عليها app/core/ocr.py — الحد الأعلى إلزامي لا تفضيلي.
+# بدونه كان `pip install -r requirements.txt` يسحب 3.x فتفشل قراءة اللوحات
+# بـTypeError يُبتلع بصمت في `OCRService._safe_read`.
+paddleocr>=2.8.0,<3
+paddlepaddle-gpu>=2.6.0,<3
+numpy>=1.26.0,<3
 
 # قاعدة البيانات
-duckdb>=1.1.0
-pandas>=2.2.0
+duckdb>=1.1.0,<2
+pandas>=2.2.0,<3
 
 # الواجهة
-PyQt6>=6.7.0
-PyQt6-Qt6>=6.7.0
-pyqtgraph>=0.13.0
+PyQt6>=6.7.0,<7
+PyQt6-Qt6>=6.7.0,<7
+pyqtgraph>=0.13.0,<0.14
 
 # معالجة الفيديو
-ffmpeg-python>=0.2.0
-scenedetect>=0.6.4
-Pillow>=10.4.0
-imagehash>=4.3.0
+ffmpeg-python>=0.2.0,<0.3
+scenedetect>=0.7.1,<0.8
+Pillow>=12.3.0,<13
+imagehash>=4.3.0,<5
 
 # النص العربي
-arabic-reshaper>=3.0.0
-python-bidi>=0.5.0
+arabic-reshaper>=3.0.0,<4
+python-bidi>=0.5.0,<1
 
 # التصدير
-openpyxl>=3.1.0
-reportlab>=4.2.0
+openpyxl>=3.1.0,<4
+reportlab>=4.2.0,<5
 
 # الإعدادات
-python-dotenv>=1.0.0
-pydantic>=2.8.0
-pydantic-settings>=2.4.0
+python-dotenv>=1.0.0,<2
+pydantic>=2.8.0,<3
+pydantic-settings>=2.4.0,<3
 
-# أدوات التطوير
-pytest>=8.3.0
-pytest-qt>=4.4.0
-pytest-cov>=5.0.0
-black>=24.8.0
-ruff>=0.6.0
-mypy>=1.11.0
+# قيود على تبعيات غير مباشرة بثغرات معروفة (يكشفها pip-audit في CI)
+click>=8.3.3,<9
+
+# أدوات التطوير (انظر أيضاً requirements-ci.txt)
+pytest>=9.0.3,<10
+pytest-qt>=4.4.0,<5
+pytest-cov>=5.0.0,<8
+black>=26.3.1,<27
+ruff>=0.15.8,<0.16
+mypy>=1.11.0,<2
+pip-audit>=2.7.0,<3

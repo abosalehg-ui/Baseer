@@ -8,6 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,14 @@ class FFmpegNotFoundError(RuntimeError):
     """يُرفع عند عدم وجود FFmpeg/ffprobe في PATH."""
 
 
+# مهلة تنفيذ ffprobe/ffmpeg بالثواني.
+# بلا مهلة، ملف فيديو تالف أو مُصاغ خصيصاً قد يُعلّق العملية للأبد — وهو سطح
+# الهجوم الوحيد ذو المعنى في التطبيق (المستخدم يستورد مقاطع من مصادر خارجية
+# بينها "سوشل ميديا").
+FFPROBE_TIMEOUT_SEC: int = 60
+FFMPEG_TIMEOUT_SEC: int = 120
+
+
 def _require_ffprobe() -> str:
     """يتحقق من وجود ffprobe ويعيد مساره."""
     path = shutil.which("ffprobe")
@@ -38,7 +47,7 @@ def _require_ffprobe() -> str:
     return path
 
 
-def probe_video(filepath: Path | str) -> dict:
+def probe_video(filepath: Path | str) -> dict[str, Any]:
     """يعيد ناتج ffprobe بصيغة JSON خام."""
     ffprobe = _require_ffprobe()
     path = Path(filepath)
@@ -54,10 +63,22 @@ def probe_video(filepath: Path | str) -> dict:
         "-show_streams",
         str(path),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=FFPROBE_TIMEOUT_SEC
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"تجاوز ffprobe المهلة ({FFPROBE_TIMEOUT_SEC}ث) على {path.name} — "
+            "قد يكون الملف تالفاً"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(f"فشل ffprobe: {result.stderr.strip()}")
-    return json.loads(result.stdout or "{}")
+    try:
+        parsed: dict[str, Any] = json.loads(result.stdout or "{}")
+        return parsed
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"ناتج ffprobe غير صالح لـ {path.name}: {exc}") from exc
 
 
 def _parse_fps(rate: str | None) -> float | None:
@@ -77,7 +98,7 @@ def _parse_fps(rate: str | None) -> float | None:
         return None
 
 
-def _parse_recorded_at(tags: dict) -> datetime | None:
+def _parse_recorded_at(tags: dict[str, Any]) -> datetime | None:
     """يستخرج وقت التسجيل من tags الفيديو."""
     candidates = ("creation_time", "com.apple.quicktime.creationdate", "date")
     for key in candidates:
@@ -129,7 +150,12 @@ def generate_thumbnail(
         "3",
         str(dst),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, check=False, timeout=FFMPEG_TIMEOUT_SEC
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"تجاوز ffmpeg المهلة ({FFMPEG_TIMEOUT_SEC}ث) على {src.name}") from exc
     if result.returncode != 0 or not dst.exists():
         raise RuntimeError(f"فشل توليد thumbnail: {result.stderr.strip()[:200]}")
     return dst

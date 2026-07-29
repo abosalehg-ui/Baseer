@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import logging
 import os
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from app.config import PROJECT_ROOT
 from app.constants import SOURCE_ARABIC_NAMES, VIOLATION_ARABIC_NAMES, SourceType, ViolationType
@@ -36,6 +38,15 @@ def find_arabic_font() -> Path | None:
     env = os.environ.get("BASEER_PDF_FONT")
     if env and Path(env).is_file():
         return Path(env)
+
+    try:
+        from app.config import get_settings
+
+        configured = get_settings().pdf_font
+        if configured and Path(configured).is_file():
+            return Path(configured)
+    except Exception:  # noqa: BLE001
+        pass
 
     assets_fonts = PROJECT_ROOT / "assets" / "fonts"
     if assets_fonts.is_dir():
@@ -71,12 +82,69 @@ def _register_arabic_font() -> str | None:
 
 
 # ============================================
+# التجهيل (Anonymization)
+# ============================================
+# ملح ثابت للتجهيل داخل الدراسة الواحدة: يجعل نفس اللوحة تُعطي نفس الرمز
+# (فتبقى التحليلات «كم مخالفة لنفس المركبة؟» ممكنة) دون كشف الرقم نفسه.
+_DEFAULT_SALT_ENV = "BASEER_ANON_SALT"
+
+
+def anonymization_salt() -> str:
+    """الملح المستخدم في تجهيل اللوحات — من البيئة ثم من الإعدادات."""
+    env_value = os.environ.get(_DEFAULT_SALT_ENV)
+    if env_value:
+        return env_value
+    try:
+        from app.config import get_settings
+
+        return get_settings().anon_salt
+    except Exception:  # noqa: BLE001 - لا نُسقط التصدير على إعدادات معطوبة
+        return "baseer-default-salt"
+
+
+def pseudonymize_plate(plate: str | None, *, salt: str | None = None) -> str | None:
+    """يحوّل رقم لوحة إلى رمز مستعار ثابت لا يمكن عكسه.
+
+    الدراسة الإحصائية (توزيع المخالفات على الأنواع والساعات) **لا تحتاج أرقام
+    اللوحات أصلاً**، بينما تصديرها يجعل ملف CSV سجلاً شخصياً كاملاً يربط مركبات
+    محدَّدة بأوقات ومواقع. الرمز المستعار يحفظ قابلية التجميع ويُسقط الهوية.
+    """
+    if not plate:
+        return None
+    digest = hashlib.sha256(f"{salt or anonymization_salt()}::{plate}".encode()).hexdigest()
+    return f"PLATE-{digest[:10].upper()}"
+
+
+def anonymize_violation_rows(
+    violations: list[ViolationRow], *, salt: str | None = None
+) -> list[ViolationRow]:
+    """ينسخ صفوف المخالفات بلوحات مستعارة (بلا تعديل الأصل)."""
+    return [
+        replace(v, license_plate=pseudonymize_plate(v.license_plate, salt=salt)) for v in violations
+    ]
+
+
+def anonymize_study(study: dict[str, Any], *, salt: str | None = None) -> dict[str, Any]:
+    """ينسخ الدراسة مع تجهيل اللوحات داخل قائمة المخالفات."""
+    out: dict[str, Any] = dict(study)
+    out["anonymized"] = True
+    out["violations"] = [
+        {**v, "license_plate": pseudonymize_plate(v.get("license_plate"), salt=salt)}
+        for v in study.get("violations", [])
+    ]
+    return out
+
+
+# ============================================
 # تجميع دراسة كاملة
 # ============================================
-def build_study(service: DashboardService) -> dict:
-    """يجمع كل بيانات الدراسة في dict واحد قابل للتسلسل."""
+def build_study(service: DashboardService, *, anonymize: bool = False) -> dict[str, Any]:
+    """يجمع كل بيانات الدراسة في dict واحد قابل للتسلسل.
+
+    `anonymize=True` يستبدل أرقام اللوحات برموز مستعارة ثابتة — للنشر والمشاركة.
+    """
     kpis = service.get_kpis()
-    return {
+    study = {
         "generated_at": datetime.now().isoformat(),
         "kpis": asdict(kpis),
         "violations": [asdict(v) for v in service.list_violations()],
@@ -85,12 +153,13 @@ def build_study(service: DashboardService) -> dict:
         "by_weekday": service.violations_by_weekday(),
         "by_review_status": service.violations_by_review_status(),
     }
+    return anonymize_study(study) if anonymize else study
 
 
 # ============================================
 # JSON
 # ============================================
-def export_json(study: dict, output_path: Path | str) -> Path:
+def export_json(study: dict[str, Any], output_path: Path | str) -> Path:
     """يكتب الدراسة كـ JSON بدعم عربي كامل."""
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -104,8 +173,9 @@ def export_json(study: dict, output_path: Path | str) -> Path:
 def _json_default(value: object) -> str:
     if isinstance(value, datetime):
         return value.isoformat()
-    if hasattr(value, "isoformat"):
-        return value.isoformat()  # type: ignore[no-any-return]
+    isoformat = getattr(value, "isoformat", None)
+    if callable(isoformat):
+        return str(isoformat())
     return str(value)
 
 
@@ -144,7 +214,7 @@ def export_csv(violations: list[ViolationRow], output_path: Path | str) -> Path:
 # Excel (لو openpyxl متاح)
 # ============================================
 def export_excel(
-    study: dict,
+    study: dict[str, Any],
     violations: list[ViolationRow],
     output_path: Path | str,
 ) -> Path:
@@ -198,7 +268,7 @@ def export_excel(
 # PDF عربي (reportlab + arabic-reshaper + bidi)
 # ============================================
 def export_pdf(
-    study: dict,
+    study: dict[str, Any],
     violations: list[ViolationRow],
     output_path: Path | str,
     *,
@@ -246,7 +316,7 @@ def export_pdf(
         leading=22,
     )
 
-    story: list = [Paragraph(_shape(title), title_style), Spacer(1, 12)]
+    story: list[Any] = [Paragraph(_shape(title), title_style), Spacer(1, 12)]
 
     kpis = study.get("kpis", {})
     story.append(Paragraph(_shape("المؤشرات الرئيسية"), rtl_style))
@@ -265,7 +335,7 @@ def export_pdf(
     return out
 
 
-def _kpi_table(kpis: dict, font: str | None = None) -> object:
+def _kpi_table(kpis: dict[str, Any], font: str | None = None) -> object:
     from reportlab.lib import colors
     from reportlab.platypus import Table
 
@@ -280,7 +350,7 @@ def _kpi_table(kpis: dict, font: str | None = None) -> object:
     return table
 
 
-def _by_type_table(by_type: list, font: str | None = None) -> object:
+def _by_type_table(by_type: list[Any], font: str | None = None) -> object:
     from reportlab.lib import colors
     from reportlab.platypus import Table
 
@@ -318,7 +388,7 @@ def _violations_table(violations: list[ViolationRow], font: str | None = None) -
     return table
 
 
-def _default_table_style(colors_module, font: str | None = None) -> object:
+def _default_table_style(colors_module: Any, font: str | None = None) -> object:
     from reportlab.platypus import TableStyle
 
     commands = [
@@ -364,7 +434,7 @@ def _source_arabic_name(source: str) -> str:
 # تسجيل التصدير في DB
 # ============================================
 def record_export(
-    db,
+    db: Any,
     *,
     study_name: str,
     fmt: str,
@@ -379,10 +449,14 @@ def record_export(
 
 
 __all__ = [
+    "anonymization_salt",
+    "anonymize_study",
+    "anonymize_violation_rows",
     "build_study",
     "export_csv",
     "export_excel",
     "export_json",
     "export_pdf",
+    "pseudonymize_plate",
     "record_export",
 ]

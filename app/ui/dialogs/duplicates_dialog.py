@@ -44,7 +44,8 @@ class DuplicatesDialog(QDialog):
         root = QVBoxLayout(self)
         root.addWidget(
             QLabel(
-                "كل مجموعة تحتوي مقطعاً ممثِّلاً (يُبقى) ومقاطع مكررة. " "اختر المكررات واحذفها بأمان.",
+                "كل مجموعة تحتوي مقطعاً ممثِّلاً (يُبقى) ومقاطع مكررة. "
+                "اختر المكررات واحذفها بأمان.",
                 self,
             )
         )
@@ -111,7 +112,12 @@ class DuplicatesDialog(QDialog):
         confirm = QMessageBox.question(
             self,
             "تأكيد الحذف",
-            f"حذف {len(ids)} مقطع مكرر نهائياً؟ لا يمكن التراجع.",
+            f"<b>حذف {len(ids)} مقطع مكرر من القاعدة؟</b> لا يمكن التراجع.<br><br>"
+            "سيُحذف سجل المقطع وكشوفاته ومخالفاته والصورة المصغّرة.<br>"
+            "⚠️ <b>ملف الفيديو نفسه يبقى على القرص</b> — احذفه يدوياً إن أردت "
+            "إزالة محتواه (وجوه/لوحات) فعلياً.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
@@ -124,8 +130,7 @@ class DuplicatesDialog(QDialog):
         self.reload()
 
     def _filename_map(self) -> dict[int, str]:
-        rows = self._service._db.fetch_all("SELECT id, filename FROM videos")  # noqa: SLF001
-        return {int(r[0]): str(r[1]) for r in rows}
+        return dict(self._service.video_names())
 
 
 __all__ = ["DuplicatesDialog"]

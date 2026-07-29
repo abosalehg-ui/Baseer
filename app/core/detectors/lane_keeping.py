@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from app.constants import ViolationType
 from app.core.analyzer import Detection
-from app.core.rules import BaseViolationDetector, Track, ViolationCandidate, Zone
+from app.core.violations import BaseViolationDetector, Track, ViolationCandidate, Zone
 from app.utils.geometry import BBox, clip_segment_to_bbox
 
 LANE_LINE_CLASSES = ("lane_line_solid", "lane_line_dashed")

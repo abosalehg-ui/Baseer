@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import shutil
 import sys
@@ -16,6 +17,7 @@ from app import __app_name_en__
 from app.config import ensure_directories, get_settings
 from app.core.db import get_database
 from app.ui.main_window import MainWindow
+from app.ui.theme import apply_theme
 
 
 def _configure_logging() -> None:
@@ -47,16 +49,30 @@ def main() -> int:
     _configure_logging()
     logger = logging.getLogger(__name__)
 
-    settings = get_settings()
-    ensure_directories(settings)
-    logger.info("بدء تشغيل بَصير — مسار البيانات: %s", settings.data_dir)
-
-    db = get_database(settings)
-    logger.info("قاعدة البيانات جاهزة في %s — الجداول: %s", db.path, db.list_tables())
-
+    # ⚠️ ترتيب مقصود: `QApplication` **قبل** أي تهيئة قد تفشل.
+    # سابقاً كانت تهيئة القاعدة تسبق إنشاء التطبيق، فأي فشل (نسخة ثانية تحتفظ
+    # بالقفل، صلاحيات، قرص ممتلئ) يقتل العملية بـtraceback في stdout — وفي بناء
+    # PyInstaller بـ`console=False` لا يوجد stdout أصلاً، فالمستخدم ينقر
+    # الأيقونة ولا يحدث شيء إطلاقاً.
     app = QApplication(sys.argv)
     app.setApplicationName(__app_name_en__)
     app.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+
+    try:
+        settings = get_settings()
+        ensure_directories(settings)
+        logger.info("بدء تشغيل بَصير — مسار البيانات: %s", settings.data_dir)
+
+        db = get_database(settings)
+        logger.info("قاعدة البيانات جاهزة في %s — الجداول: %s", db.path, db.list_tables())
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("فشل تهيئة التطبيق")
+        _show_startup_error(exc)
+        return 1
+
+    # الثيم يُطبَّق مرة واحدة على مستوى التطبيق من `BASEER_UI_THEME`
+    palette = apply_theme(app, settings.ui_theme)
+    logger.info("الثيم المُطبَّق: %s", palette.name)
 
     icon = _load_app_icon()
     if not icon.isNull():
@@ -69,6 +85,26 @@ def main() -> int:
         window.setWindowIcon(icon)
     window.show()
     return app.exec()
+
+
+def _show_startup_error(exc: Exception) -> None:
+    """يعرض سبب فشل الإقلاع في نافذة — لا في stdout الذي قد لا يوجد."""
+    settings_hint = ""
+    if isinstance(exc, PermissionError | OSError):
+        settings_hint = (
+            "<br><br><b>أسباب شائعة:</b><br>"
+            "• نسخة أخرى من بَصير تعمل وتحتفظ بقفل القاعدة<br>"
+            "• لا توجد صلاحية كتابة في مجلد البيانات<br>"
+            "• القرص ممتلئ"
+        )
+    QMessageBox.critical(
+        None,
+        "تعذّر تشغيل بَصير",
+        "<b>فشلت تهيئة التطبيق.</b><br><br>"
+        f"<code>{html.escape(str(exc))}</code>"
+        f"{settings_hint}<br><br>"
+        "التفاصيل الكاملة في ملف السجل.",
+    )
 
 
 def _load_app_icon() -> QIcon:
