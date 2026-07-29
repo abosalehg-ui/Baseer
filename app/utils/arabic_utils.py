@@ -61,4 +61,4 @@ def shape_for_pdf(text: str) -> str:
     except ImportError as exc:
         raise RuntimeError("يحتاج arabic-reshaper و python-bidi") from exc
     reshaped = arabic_reshaper.reshape(text)
-    return get_display(reshaped)
+    return str(get_display(reshaped))

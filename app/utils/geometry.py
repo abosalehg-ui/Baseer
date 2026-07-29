@@ -2,11 +2,61 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Iterable
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 Point = tuple[float, float]
 BBox = tuple[float, float, float, float]  # x1, y1, x2, y2
 Polygon = list[Point]
+
+
+# ============================================
+# تحليل دفاعي لـpolygon مخزَّن كـJSON
+# ============================================
+def parse_polygon_json(raw: str | bytes | None) -> Polygon:
+    """يفكّ polygon مخزَّناً كـJSON إلى نقاط، ويُرجع [] عند أي تلف.
+
+    كل مواضع القراءة (`rules.load_zones_from_db`، `zones.list_zones`،
+    `calibration.get_calibration`) كانت تنفّذ `json.loads` ثم `float(p[0])`
+    مباشرة: صف تالف أو مُعدَّل بأداة خارجية يرفع `JSONDecodeError`/`IndexError`
+    فيُبتلع كفشل كاشف صامت أو يُسقط المسار كله. التحقق هنا مرة واحدة.
+    """
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        logger.warning("polygon مخزَّن غير صالح كـJSON: %s", exc)
+        return []
+    if not isinstance(data, list):
+        logger.warning("polygon مخزَّن ليس قائمة: %r", type(data).__name__)
+        return []
+
+    points: Polygon = []
+    for item in data:
+        try:
+            x, y = item[0], item[1]
+            points.append((float(x), float(y)))
+        except (TypeError, ValueError, IndexError, KeyError):
+            logger.warning("نقطة polygon غير صالحة تُتخطّى: %r", item)
+            continue
+    return points
+
+
+def parse_metadata_json(raw: str | bytes | None) -> dict[str, Any] | None:
+    """يفكّ metadata مخزَّنة كـJSON، ويُرجع None عند التلف."""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        logger.warning("metadata مخزَّنة غير صالحة كـJSON: %s", exc)
+        return None
+    return data if isinstance(data, dict) else None
 
 
 # ============================================
@@ -101,7 +151,7 @@ def segments_intersect(a1: Point, a2: Point, b1: Point, b2: Point) -> bool:
 # حركة وإزاحة
 # ============================================
 def euclidean_distance(a: Point, b: Point) -> float:
-    return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5
+    return float(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5)
 
 
 def total_path_length(points: Iterable[Point]) -> float:
@@ -186,4 +236,4 @@ def clip_segment_to_bbox(p1: Point, p2: Point, bbox: BBox) -> float:
             if t < t1:
                 t1 = t
     clipped_len = ((dx * (t1 - t0)) ** 2 + (dy * (t1 - t0)) ** 2) ** 0.5
-    return clipped_len
+    return float(clipped_len)

@@ -1,24 +1,37 @@
 # تبعيات الـ CI فقط — مجموعة فرعية خفيفة من requirements.txt
 # (لا GPU، لا paddlepaddle، لا ultralytics — تُختبر محلياً)
+# الحدود العليا هنا تطابق requirements.txt حتى لا ينحرف CI عن الإنتاج.
 
 # قاعدة البيانات
-duckdb>=1.1.0
+duckdb>=1.1.0,<2
 
 # معالجة الفيديو والصور
-Pillow>=10.4.0
-imagehash>=4.3.0
-ffmpeg-python>=0.2.0
-scenedetect>=0.6.4
+Pillow>=12.3.0,<13
+imagehash>=4.3.0,<5
+ffmpeg-python>=0.2.0,<0.3
+scenedetect>=0.7.1,<0.8
 
 # الإعدادات
-python-dotenv>=1.0.0
-pydantic>=2.8.0
-pydantic-settings>=2.4.0
+python-dotenv>=1.0.0,<2
+pydantic>=2.8.0,<3
+pydantic-settings>=2.4.0,<3
 
 # الواجهة
-PyQt6>=6.7.0
-pyqtgraph>=0.13.0
+PyQt6>=6.7.0,<7
+pyqtgraph>=0.13.0,<0.14
+
+# التصدير — تُشغَّل اختبارات Excel/PDF فعلياً بدل تخطّيها في CI
+openpyxl>=3.1.0,<4
+reportlab>=4.2.0,<5
+arabic-reshaper>=3.0.0,<4
+python-bidi>=0.5.0,<1
+
+# قيود على تبعيات غير مباشرة بثغرات معروفة (يكشفها pip-audit في CI).
+# scenedetect يطلب click~=8.0 بلا حد أدنى آمن؛ نرفعه هنا صراحةً.
+click>=8.3.3,<9
 
 # الاختبارات
-pytest>=8.3.0
-pytest-cov>=5.0.0
+pytest>=9.0.3,<10
+pytest-cov>=5.0.0,<8
+# لازم لاختبارات الودجات والإشارات — كان غائباً، فأي اختبار Qt يُكتب لا يعمل في CI
+pytest-qt>=4.4.0,<5

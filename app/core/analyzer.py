@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -53,6 +53,51 @@ class AnalysisResult:
     detections_count: int
 
 
+@dataclass(frozen=True)
+class VideoReadiness:
+    """جاهزية مقطع لاستخراج المخالفات — أي متطلبات الكواشف متوفرة.
+
+    الكواشف تعود مبكراً بصمت عند غياب متطلبها، فهذا الملخّص يجعل السبب مرئياً
+    في الواجهة قبل أن يضغط المستخدم «استخراج» ويحصل على صفر بلا تفسير.
+    """
+
+    video_id: int
+    has_detections: bool
+    has_tracks: bool
+    zone_types: set[str] = field(default_factory=set)
+    has_calibration: bool = False
+    has_video_file: bool = False
+
+    @property
+    def blocked_detectors(self) -> list[str]:
+        """أسماء الكواشف المعطّلة عربياً مع سبب التعطيل."""
+        out: list[str] = []
+        if not self.has_tracks:
+            out.append("كل الكواشف (لا توجد tracks — فعّل التتبّع عند الاستدلال)")
+            return out
+        if "stop_line" not in self.zone_types:
+            out.append("قطع الإشارة الحمراء (تحتاج منطقة stop_line)")
+        if "no_parking" not in self.zone_types:
+            out.append("الوقوف الخاطئ (تحتاج منطقة no_parking)")
+        if "lane_line_solid" not in self.zone_types:
+            out.append("التجاوز الخاطئ (يحتاج خط lane_line_solid)")
+        if not self.has_calibration:
+            out.append("السرعة الزائدة والمسافة الآمنة (تحتاجان معايرة)")
+        if not self.has_video_file:
+            out.append("إساءة أنوار التلاقي (تحتاج ملف الفيديو)")
+        return out
+
+    @property
+    def summary(self) -> str:
+        """سطر مختصر للعرض في عمود «الجاهزية»."""
+        marks = [
+            f"tracks: {'✓' if self.has_tracks else '✗'}",
+            f"مناطق: {len(self.zone_types)}",
+            f"معايرة: {'✓' if self.has_calibration else '✗'}",
+        ]
+        return " • ".join(marks)
+
+
 # نوع الـ callable الذي يُجري الاستدلال الفعلي على ملف فيديو
 # نأخذه كـ dependency لتسهيل الـ mocking في الاختبارات.
 InferenceCallable = Callable[[Path, AnalysisConfig], Iterable[Detection]]
@@ -77,6 +122,7 @@ class AnalyzerService:
         # عند الحاجة فقط (وجود كشوفات license_plate + ملف فيديو).
         self._ocr_service = ocr_service
         self._frame_provider_factory = frame_provider_factory
+        self._last_detector_failures: list[str] = []
 
     # ============================================
     # واجهة عامة
@@ -182,15 +228,13 @@ class AnalyzerService:
         if video_filepath is not None and Path(video_filepath).exists():
             detectors.append(HighBeamDetector(video_path=video_filepath))
 
-        candidates = run_detectors(detections, zones, actual_fps, detectors=detectors)
+        run_result = run_detectors(detections, zones, actual_fps, detectors=detectors)
+        candidates = run_result.candidates
+        failures = run_result.failures
 
         # قراءة لوحات المركبات المخالِفة (اختياري — يُتخطّى بلا كشوفات لوحات/فيديو)
         plates = self._read_plates(candidates, detections, video_filepath)
 
-        # نحذف فقط المخالفات التلقائية حتى تبقى المخالفات اليدوية محفوظة بعد إعادة التحليل
-        self._db.execute(
-            "DELETE FROM violations WHERE video_id = ? AND source = 'auto'", (video_id,)
-        )
         rows = [
             (
                 video_id,
@@ -207,23 +251,79 @@ class AnalyzerService:
             )
             for i, c in enumerate(candidates)
         ]
-        if rows:
-            self._db.executemany(
-                """
-                INSERT INTO violations
-                    (video_id, violation_type, start_ms, end_ms, confidence,
-                     track_id, evidence_frames, license_plate, plate_conf, notes, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
+
+        # الحذف والإدراج في معاملة واحدة: بدونها، فشل الإدراج يترك المقطع بلا
+        # مخالفات تلقائية بعد أن حُذفت القديمة (فقدان بيانات صامت).
+        # نحذف فقط `source='auto'` حتى تبقى المخالفات اليدوية محفوظة.
+        with self._db.transaction():
+            self._db.execute(
+                "DELETE FROM violations WHERE video_id = ? AND source = 'auto'", (video_id,)
+            )
+            if rows:
+                self._db.executemany(
+                    """
+                    INSERT INTO violations
+                        (video_id, violation_type, start_ms, end_ms, confidence,
+                         track_id, evidence_frames, license_plate, plate_conf, notes, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self._db.execute(
+                "UPDATE videos SET status = ? WHERE id = ?",
+                (VideoStatus.ANALYZED.value, video_id),
             )
 
-        self._db.execute(
-            "UPDATE videos SET status = ? WHERE id = ?",
-            (VideoStatus.ANALYZED.value, video_id),
-        )
+        if failures:
+            logger.warning(
+                "المقطع %d: فشل %d كاشف — %s", video_id, len(failures), "؛ ".join(failures)
+            )
         logger.info("تم استخراج %d مخالفة من المقطع %d", len(rows), video_id)
+        self._last_detector_failures = failures
         return len(rows)
+
+    @property
+    def last_detector_failures(self) -> list[str]:
+        """أسماء/رسائل الكواشف التي فشلت في آخر `extract_violations`.
+
+        تُقرأ من الواجهة لعرض السبب بدل ترك المستخدم أمام «0 مخالفة» بلا تفسير.
+        """
+        return list(self._last_detector_failures)
+
+    def readiness(self, video_id: int) -> VideoReadiness:
+        """يفحص متطلبات الكواشف لمقطع — لعرضها في الواجهة قبل الاستخراج.
+
+        كل كاشف يعود مبكراً بقائمة فارغة عند غياب متطلبه (منطقة/معايرة/tracks)،
+        وهذا الفحص يجعل السبب مرئياً بدل الفشل الصامت.
+        """
+        from app.core.calibration import CalibrationService
+
+        zone_rows = self._db.fetch_all(
+            "SELECT DISTINCT zone_type FROM zones WHERE video_id = ?", (video_id,)
+        )
+        zone_types = {str(r[0]) for r in zone_rows}
+
+        cal = CalibrationService(db=self._db).get_calibration(video_id)
+        tracked = self._db.fetch_one(
+            "SELECT COUNT(*) FROM detections WHERE video_id = ? AND track_id IS NOT NULL",
+            (video_id,),
+        )
+        filepath = self._video_filepath(video_id)
+        return VideoReadiness(
+            video_id=video_id,
+            has_detections=bool(
+                (
+                    self._db.fetch_one(
+                        "SELECT COUNT(*) FROM detections WHERE video_id = ?", (video_id,)
+                    )
+                    or (0,)
+                )[0]
+            ),
+            has_tracks=bool(tracked and tracked[0]),
+            zone_types=zone_types,
+            has_calibration=cal is not None and cal.meters_per_px > 0,
+            has_video_file=filepath is not None and Path(filepath).exists(),
+        )
 
     def _read_plates(
         self,
@@ -253,7 +353,8 @@ class AnalyzerService:
         out: dict[int, tuple[str | None, float | None]] = {}
         try:
             for i, cand in enumerate(candidates):
-                track = tracks_by_id.get(getattr(cand, "track_id", None))
+                track_id = getattr(cand, "track_id", None)
+                track = tracks_by_id.get(track_id) if track_id is not None else None
                 if track is None:
                     continue
                 track_bboxes = {d.frame_no: d.bbox for d in track.detections}
@@ -343,7 +444,7 @@ def _default_inference(filepath: Path, config: AnalysisConfig) -> Iterable[Detec
     Lazy import حتى لا نُحمّل torch في كل مرة يُستورد فيها المحلِّل (للاختبارات والـ CI).
     """
     try:
-        from ultralytics import YOLO  # type: ignore
+        from ultralytics import YOLO
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("يحتاج ultralytics — ثبّت requirements.txt") from exc
 
@@ -420,6 +521,7 @@ __all__ = [
     "AnalyzerService",
     "Detection",
     "InferenceCallable",
+    "VideoReadiness",
 ]
 
 

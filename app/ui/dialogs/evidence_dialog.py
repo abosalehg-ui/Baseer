@@ -10,6 +10,7 @@ import json
 import logging
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from PyQt6.QtCore import Qt
@@ -52,8 +53,16 @@ def extract_evidence_images(
     *,
     provider_factory: Callable[[str], object] | None = None,
     max_frames: int = 6,
-) -> list[np.ndarray]:
-    """يستخرج إطارات الإثبات كمصفوفات BGR (قابل للحقن عبر provider_factory)."""
+) -> list[tuple[int, np.ndarray]]:
+    """يستخرج إطارات الإثبات كأزواج (رقم الإطار، مصفوفة BGR).
+
+    **يُعيد الرقم مع الصورة عمداً:** الإطارات التي تفشل قراءتها تُسقَط، فلو
+    أعدنا الصور وحدها لانزاحت مقابلتها بأرقام الإطارات عند العرض وظهرت صورة
+    الإطار 250 معنونة «إطار 100». في تطبيق مُخرَجه دليل على مخالفة، الاقتران
+    الصحيح بين الصورة ورقمها ليس تفصيلاً تجميلياً.
+
+    قابل للحقن عبر `provider_factory` لاختباره بلا فيديو حقيقي.
+    """
     if not frame_nos:
         return []
     if provider_factory is not None:
@@ -67,17 +76,19 @@ def extract_evidence_images(
             logger.warning("تعذّر فتح الفيديو لاستخراج الأدلة: %s", exc)
             return []
 
-    images: list[np.ndarray] = []
+    pairs: list[tuple[int, np.ndarray]] = []
     try:
         for frame_no in frame_nos[:max_frames]:
-            frame = provider.get_frame(frame_no)  # type: ignore[attr-defined]
+            frame = provider.get_frame(frame_no)
             if frame is not None:
-                images.append(frame)
+                pairs.append((frame_no, frame))
+            else:
+                logger.warning("تعذّرت قراءة إطار الإثبات %d من %s", frame_no, video_path)
     finally:
         close = getattr(provider, "close", None)
         if callable(close):
             close()
-    return images
+    return pairs
 
 
 class EvidenceDialog(QDialog):
@@ -100,7 +111,7 @@ class EvidenceDialog(QDialog):
         self._row = self._load_violation(violation_id)
         self._build_ui()
 
-    def _load_violation(self, violation_id: int) -> dict | None:
+    def _load_violation(self, violation_id: int) -> dict[str, Any] | None:
         row = self._db.fetch_one(
             "SELECT vi.id, vi.video_id, v.filepath, v.filename, vi.violation_type, "
             "vi.start_ms, vi.end_ms, vi.evidence_frames, vi.license_plate, vi.notes, v.fps "
@@ -176,14 +187,18 @@ class EvidenceDialog(QDialog):
         layout = QHBoxLayout(container)
 
         frame_nos = evidence_frame_numbers(self._row["evidence_frames"])
-        images = extract_evidence_images(
+        pairs = extract_evidence_images(
             self._row["filepath"], frame_nos, provider_factory=self._provider_factory
         )
-        if not images:
+        if not pairs:
             layout.addWidget(QLabel("لا تتوفّر إطارات إثبات.", container))
         else:
-            for frame, image in zip(frame_nos, images, strict=False):
-                layout.addWidget(self._thumb_widget(frame, image, container))
+            # كل صورة مقترنة برقم إطارها من المصدر — لا مزاوجة بالترتيب
+            for frame_no, image in pairs:
+                layout.addWidget(self._thumb_widget(frame_no, image, container))
+            missing = len(frame_nos[:6]) - len(pairs)
+            if missing > 0:
+                layout.addWidget(QLabel(f"({missing} إطار تعذّرت قراءته)", container))
         layout.addStretch()
         area.setWidget(container)
         return area

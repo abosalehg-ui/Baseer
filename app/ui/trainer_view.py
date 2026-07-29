@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -71,6 +72,12 @@ class TrainerView(QWidget):
         self._eval_table = QTableWidget(0, 2, self)
         self._eval_table.setHorizontalHeaderLabels(["class", "mAP50"])
         self._eval_table.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._eval_table.setAlternatingRowColors(True)
+        self._eval_table.setAccessibleName("جدول تقييم النموذج لكل فئة")
+        eval_header = self._eval_table.horizontalHeader()
+        if eval_header is not None:
+            eval_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            eval_header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         root.addWidget(self._eval_table, stretch=1)
 
     def _build_paths_row(self) -> QHBoxLayout:
@@ -132,6 +139,7 @@ class TrainerView(QWidget):
         bar.addWidget(self._start_btn)
 
         self._stop_btn = QPushButton("إيقاف التدريب", self)
+        self._stop_btn.setAccessibleName("إيقاف التدريب بعد الـ epoch الحالي")
         self._stop_btn.setEnabled(False)
         self._stop_btn.clicked.connect(self._on_stop)
         bar.addWidget(self._stop_btn)
@@ -283,7 +291,6 @@ class TrainerView(QWidget):
         for r, (name, value) in enumerate(items):
             self._eval_table.setItem(r, 0, QTableWidgetItem(str(name)))
             self._eval_table.setItem(r, 1, QTableWidgetItem(f"{value:.3f}"))
-        self._eval_table.resizeColumnsToContents()
 
     # ============================================
     # مساعدات

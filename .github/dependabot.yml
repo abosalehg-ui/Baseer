@@ -1,0 +1,40 @@
+version: 2
+
+# تحديث آلي للتبعيات وأدوات اللينت.
+# السبب: أدوات اللينت كانت مثبَّتة على إصدار واحد في CI بلا آلية ترقية، فينحرف
+# الكود صامتاً عن الإصدار الحالي؛ ومكتبات المعالجة (torch/opencv/paddle) لها
+# تاريخ ثغرات فك تشفير نشط بلا أي مراقبة.
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+    groups:
+      # ترقيات أدوات التطوير مجمّعة في PR واحد (منخفضة المخاطر)
+      dev-tools:
+        patterns:
+          - black
+          - ruff
+          - mypy
+          - "pytest*"
+          - pip-audit
+      # مكتبات الرؤية/التعلّم مجمّعة — ترقيتها تحتاج تحققاً يدوياً
+      ml-stack:
+        patterns:
+          - torch
+          - torchvision
+          - ultralytics
+          - opencv-python
+          - "paddle*"
+          - numpy
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    labels:
+      - dependencies

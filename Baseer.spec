@@ -16,6 +16,9 @@ block_cipher = None
 datas = [
     ("assets/icon.ico", "assets"),
     ("assets/icon.png", "assets"),
+    # الخط العربي يُحزَم مع التطبيق: بدونه يعود تصدير PDF إلى Helvetica الذي
+    # لا يرسم العربية، فيخرج تقرير بلا نص عربي مع مجرد تحذير في السجل.
+    ("assets/fonts", "assets/fonts"),
 ]
 
 # أي ملف .env.example موجود يُحزم كقالب
@@ -56,8 +59,9 @@ a = Analysis(
         "torch.test",
         "torch.testing",
         "torch.distributed",  # غير مستخدم في Baseer
-        "torch.onnx",  # غير مستخدم
-        "torch.jit",  # غير مستخدم في الاستخدام العادي
+        "torch.onnx",  # غير مستخدم (التصدير إلى ONNX يتم خارج التطبيق)
+        # ملاحظة: "torch.jit" **لا يُستبعَد** — torch يستورده داخلياً عند
+        # تحميل النماذج، واستبعاده يُنتج bundle ينهار عند أول استدلال.
         "scipy.io.tests",
         "scipy.signal.tests",
         "scipy.stats.tests",

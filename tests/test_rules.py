@@ -304,22 +304,27 @@ def test_run_detectors_returns_all_violations() -> None:
         Zone(zone_type="stop_line", polygon=[(0, 50), (200, 50)]),
         Zone(zone_type="lane_line_solid", polygon=[(0, 55), (200, 55)]),
     ]
-    violations = run_detectors(dets, zones, fps=30.0)
-    types = {v.violation_type for v in violations}
+    result = run_detectors(dets, zones, fps=30.0)
+    types = {v.violation_type for v in result.candidates}
     assert ViolationType.RED_LIGHT_RUNNING in types
     assert ViolationType.ILLEGAL_OVERTAKING in types
+    assert result.failures == []
 
 
 def test_run_detectors_isolates_detector_failures() -> None:
-    """فشل كاشف واحد لا يُسقط البقية."""
+    """فشل كاشف واحد لا يُسقط البقية، ويُبلَّغ عنه صراحةً بدل ابتلاعه."""
 
     class _BrokenDetector:
         def detect(self, *args, **kwargs):  # noqa: D401
             raise RuntimeError("boom")
 
     dets = [_det(0, 1, "vehicle", (40, 0, 60, 10))]
-    out = run_detectors(dets, [], fps=30.0, detectors=[_BrokenDetector()])
-    assert out == []  # لم يرفع خطأ
+    result = run_detectors(dets, [], fps=30.0, detectors=[_BrokenDetector()])
+    assert result.candidates == []  # لم يرفع خطأ
+    # الإخفاق مُعاد صراحةً حتى تعرضه الواجهة بدل «0 مخالفة» بلا تفسير
+    assert len(result.failures) == 1
+    assert "_BrokenDetector" in result.failures[0]
+    assert "boom" in result.failures[0]
 
 
 def test_track_properties() -> None:

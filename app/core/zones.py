@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 from app.core.db import Database, get_database
-from app.utils.geometry import Point
+from app.utils.geometry import Point, parse_metadata_json, parse_polygon_json
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ class ZoneRecord:
     video_id: int
     zone_type: str
     polygon: list[Point]
-    metadata: dict | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class ZoneService:
@@ -48,7 +49,7 @@ class ZoneService:
         zone_type: str,
         polygon: list[Point],
         *,
-        metadata: dict | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> int:
         """يُضيف منطقة لمقطع ويعيد معرّفها.
 
@@ -92,15 +93,13 @@ class ZoneService:
         )
         out: list[ZoneRecord] = []
         for r in rows:
-            polygon = [(float(p[0]), float(p[1])) for p in (json.loads(r[3]) if r[3] else [])]
-            metadata = json.loads(r[4]) if r[4] else None
             out.append(
                 ZoneRecord(
                     id=int(r[0]),
                     video_id=int(r[1]),
                     zone_type=str(r[2]),
-                    polygon=polygon,
-                    metadata=metadata,
+                    polygon=parse_polygon_json(r[3]),
+                    metadata=parse_metadata_json(r[4]),
                 )
             )
         return out

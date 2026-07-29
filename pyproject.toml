@@ -8,13 +8,14 @@ version = "0.1.0"
 description = "نظام تحليل المخالفات المرورية من الفيديوهات — Local desktop application"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "TBD" }
+license = { text = "AGPL-3.0-or-later" }
 authors = [
     { name = "Abdulkarim Al-Abboud" }
 ]
 keywords = ["traffic", "violations", "computer-vision", "yolo", "arabic"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -74,17 +75,40 @@ warn_unused_configs = true
 ignore_missing_imports = true
 no_implicit_optional = true
 
+# ============================================
+# سياسة الأنواع بين الطبقات
+# ============================================
+# `app/core` و`app/utils` تعملان بـstrict كاملاً — وهناك تكتشف mypy أخطاء
+# حقيقية (كشفت مثلاً أن `datetime.UTC` غير موجود في Python 3.10 الذي يدّعي
+# المشروع دعمه).
+#
+# `app/ui` و`app/workers` تُستثنى من فئات أخطاء محددة لا من الفحص كله:
+# stubs الخاصة بـPyQt6 تُرجع `X | None` من كل وصول تقريباً
+# (`menuBar()`, `style()`, `selectionModel()`, `item()`…) رغم أنها لا تكون
+# None في السياق الفعلي. فرض التحقق عليها يعني مئات `assert x is not None`
+# التي تُضيف ضجيجاً بلا أمان. أخطاء المنطق الحقيقية (أنواع غير متوافقة،
+# استدعاءات خاطئة) تبقى مُفعَّلة.
+[[tool.mypy.overrides]]
+module = ["app.ui.*", "app.workers.*", "app.main"]
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+disallow_subclassing_any = false
+warn_return_any = false
+disable_error_code = [
+    "union-attr",   # PyQt6 stubs: كل accessor يُرجع X | None
+    "override",     # توقيعات event handlers في الـstubs تستخدم Optional
+    "attr-defined", # إشارات pyqtSignal معرَّفة ديناميكياً
+    "call-overload",
+]
+
 [[tool.mypy.overrides]]
 module = [
     "ultralytics.*",
     "cv2.*",
     "paddleocr.*",
     "scenedetect.*",
-    "ffmpeg.*",
     "imagehash.*",
     "pyqtgraph.*",
-    "qtawesome.*",
-    "qt_material.*",
     "arabic_reshaper.*",
     "bidi.*",
 ]

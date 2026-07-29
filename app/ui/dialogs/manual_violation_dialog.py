@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import getpass
 import json
 import logging
 from dataclasses import dataclass
@@ -15,6 +14,7 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
@@ -25,6 +25,7 @@ from PyQt6.QtWidgets import (
 )
 
 from app.constants import VIOLATION_ARABIC_NAMES, ViolationType
+from app.core.dashboard import DashboardService
 from app.core.db import Database, get_database
 
 logger = logging.getLogger(__name__)
@@ -60,18 +61,33 @@ class ManualViolationDialog(QDialog):
         self._videos = videos
         self._existing = existing
         self._db = db or get_database()
+        # الكتابة تمرّ عبر الخدمة (تسجّل التدقيق) بدل SQL خام في الحوار
+        self._service = DashboardService(db=self._db)
         self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
         self.setWindowTitle("تعديل مخالفة يدوية" if existing else "إضافة مخالفة يدوية")
         self.setMinimumWidth(420)
-        self._build_ui(current_time_ms or 0)
+        self._build_ui(current_time_ms)
         if existing:
             self._populate_from_existing(existing)
 
     # ============================================
     # واجهة
     # ============================================
-    def _build_ui(self, current_time_ms: int) -> None:
+    def _build_ui(self, current_time_ms: int | None) -> None:
         root = QVBoxLayout(self)
+
+        # تحويل مخالفة تلقائية إلى يدوية قرار له أثر (لا تُحذف عند إعادة
+        # التحليل) — كان يحدث بصمت. نُعلم المستخدم قبل الحفظ.
+        if self._existing and str(self._existing.get("source") or "auto") != "manual":
+            notice = QLabel(
+                "ℹ️ هذه مخالفة <b>تلقائية</b>. حفظ التعديل سيحوّلها إلى <b>يدوية</b>، "
+                "فلن تُحذف عند إعادة تحليل المقطع.",
+                self,
+            )
+            notice.setWordWrap(True)
+            notice.setProperty("role", "hint")
+            root.addWidget(notice)
+
         form = QFormLayout()
 
         # المقطع
@@ -91,18 +107,22 @@ class ManualViolationDialog(QDialog):
             self._type_combo.setCurrentIndex(idx)
         form.addRow("نوع المخالفة:", self._type_combo)
 
-        # بداية الوقت + زر "الوقت الحالي"
+        # بداية الوقت — زر «الوقت المقترح» يظهر فقط عند وجود وقت حقيقي يقترحه
+        # (كان يظهر دائماً ويعيد 0 لأن المستدعي لم يمرّر أي وقت).
+        seed_ms = current_time_ms or 0
         start_row = QHBoxLayout()
         self._start_ms = QSpinBox(self)
         self._start_ms.setRange(0, 24 * 3600 * 1000)
         self._start_ms.setSingleStep(100)
         self._start_ms.setSuffix(" ms")
-        self._start_ms.setValue(current_time_ms)
+        self._start_ms.setValue(seed_ms)
+        self._start_ms.setAccessibleName("بداية المخالفة بالميلي ثانية")
         start_row.addWidget(self._start_ms, stretch=1)
-        use_now_btn = QPushButton("الوقت الحالي", self)
-        use_now_btn.setToolTip(f"يضع الوقت الحالي للمشغل ({current_time_ms} ms)")
-        use_now_btn.clicked.connect(lambda: self._start_ms.setValue(current_time_ms))
-        start_row.addWidget(use_now_btn)
+        if current_time_ms is not None:
+            use_now_btn = QPushButton("الوقت المقترح", self)
+            use_now_btn.setToolTip(f"يعيد الوقت المقترح ({seed_ms} ms)")
+            use_now_btn.clicked.connect(lambda: self._start_ms.setValue(seed_ms))
+            start_row.addWidget(use_now_btn)
         form.addRow("بداية الوقت:", start_row)
 
         # نهاية الوقت
@@ -110,7 +130,8 @@ class ManualViolationDialog(QDialog):
         self._end_ms.setRange(0, 24 * 3600 * 1000)
         self._end_ms.setSingleStep(100)
         self._end_ms.setSuffix(" ms")
-        self._end_ms.setValue(current_time_ms + 2000)
+        self._end_ms.setValue(seed_ms + 2000)
+        self._end_ms.setAccessibleName("نهاية المخالفة بالميلي ثانية")
         form.addRow("نهاية الوقت:", self._end_ms)
 
         # لوحة السيارة
@@ -202,75 +223,39 @@ class ManualViolationDialog(QDialog):
             ),
         )
 
-    def _insert_violation(self) -> None:
+    def _payload(self) -> tuple[ManualViolationData, str, str]:
+        """يجمع البيانات ويبني (data, evidence_json, notes) المشتركة بين الإدراج والتعديل."""
         data = self.collect()
         evidence_json = (
             json.dumps([data.evidence_frame]) if data.evidence_frame is not None else "[]"
         )
         notes = f"[manual] {data.notes}" if data.notes else "[manual]"
-        try:
-            user = getpass.getuser()
-        except Exception:  # noqa: BLE001
-            user = "unknown"
-        self._db.execute(
-            """
-            INSERT INTO violations (
-                video_id, violation_type, start_ms, end_ms,
-                confidence, evidence_frames, license_plate,
-                review_status, notes, source, manual_user
-            ) VALUES (?, ?, ?, ?, 1.0, ?, ?, 'confirmed', ?, 'manual', ?)
-            """,
-            (
-                data.video_id,
-                data.violation_type.value,
-                data.start_ms,
-                data.end_ms,
-                evidence_json,
-                data.license_plate or None,
-                notes,
-                user,
-            ),
+        return data, evidence_json, notes
+
+    def _insert_violation(self) -> None:
+        data, evidence_json, notes = self._payload()
+        self._service.insert_manual_violation(
+            video_id=data.video_id,
+            violation_type=data.violation_type.value,
+            start_ms=data.start_ms,
+            end_ms=data.end_ms,
+            evidence_frames_json=evidence_json,
+            license_plate=data.license_plate or None,
+            notes=notes,
         )
 
     def _update_violation(self) -> None:
         assert self._existing is not None
-        data = self.collect()
-        evidence_json = (
-            json.dumps([data.evidence_frame]) if data.evidence_frame is not None else "[]"
-        )
-        notes = f"[manual] {data.notes}" if data.notes else "[manual]"
-        viol_id = int(self._existing["id"])
-        try:
-            user = getpass.getuser()
-        except Exception:  # noqa: BLE001
-            user = "unknown"
-        # التعديل البشري يحوّل المخالفة إلى source='manual' حتى لا تُحذف عند
-        # إعادة التحليل (DELETE ... AND source='auto')، ويُحدّث video_id أيضاً.
-        self._db.execute(
-            """
-            UPDATE violations SET
-                video_id = ?,
-                violation_type = ?,
-                start_ms = ?,
-                end_ms = ?,
-                evidence_frames = ?,
-                license_plate = ?,
-                notes = ?,
-                source = 'manual',
-                manual_user = ?
-            WHERE id = ?
-            """,
-            (
-                data.video_id,
-                data.violation_type.value,
-                data.start_ms,
-                data.end_ms,
-                evidence_json,
-                data.license_plate or None,
-                notes,
-                user,
-                viol_id,
-            ),
+        data, evidence_json, notes = self._payload()
+        self._service.update_violation_as_manual(
+            int(self._existing["id"]),
+            video_id=data.video_id,
+            violation_type=data.violation_type.value,
+            start_ms=data.start_ms,
+            end_ms=data.end_ms,
+            evidence_frames_json=evidence_json,
+            license_plate=data.license_plate or None,
+            notes=notes,
         )
 
 

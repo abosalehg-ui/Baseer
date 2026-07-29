@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 
 from app.core.db import Database, get_database
-from app.utils.geometry import Point, euclidean_distance
+from app.utils.geometry import Point, euclidean_distance, parse_polygon_json
 
 logger = logging.getLogger(__name__)
 
@@ -108,11 +108,10 @@ class CalibrationService:
         )
         if row is None:
             return None
-        pts = json.loads(row[2]) if row[2] else []
         return Calibration(
             video_id=int(row[0]),
             meters_per_px=float(row[1]),
-            reference_pts=[(float(p[0]), float(p[1])) for p in pts],
+            reference_pts=parse_polygon_json(row[2]),
         )
 
     def delete_calibration(self, video_id: int) -> None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,9 +16,11 @@ from app.config import AppSettings, get_settings
 logger = logging.getLogger(__name__)
 
 # ============================================
-# تعريف المخطط (Schema DDL)
+# تعريف المخطط الأساسي (Schema DDL)
 # ============================================
-SCHEMA_STATEMENTS: tuple[str, ...] = (
+# كل عبارة هنا **idempotent** (IF NOT EXISTS) وتُنفَّذ عند كل إقلاع.
+# أي تغيير لاحق على المخطط يذهب إلى MIGRATIONS أدناه، لا هنا.
+BASE_SCHEMA: tuple[str, ...] = (
     # تسلسلات المعرفات
     "CREATE SEQUENCE IF NOT EXISTS seq_videos_id START 1;",
     "CREATE SEQUENCE IF NOT EXISTS seq_scenes_id START 1;",
@@ -98,10 +102,7 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_viol_type ON violations(violation_type);",
     "CREATE INDEX IF NOT EXISTS idx_viol_video ON violations(video_id);",
-    # ترحيل: عمود مصدر المخالفة (تلقائي/يدوي) — يحافظ على المخالفات اليدوية عند إعادة التحليل
-    "ALTER TABLE violations ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'auto';",
-    "ALTER TABLE violations ADD COLUMN IF NOT EXISTS manual_user VARCHAR;",
-    "CREATE INDEX IF NOT EXISTS idx_viol_source ON violations(source);",
+    "CREATE INDEX IF NOT EXISTS idx_viol_review ON violations(review_status);",
     # المعايرات
     """
     CREATE TABLE IF NOT EXISTS calibrations (
@@ -133,6 +134,57 @@ SCHEMA_STATEMENTS: tuple[str, ...] = (
         exported_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """,
+    # جدول تتبّع الترحيلات المُطبَّقة
+    """
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+        version     INTEGER PRIMARY KEY,
+        name        VARCHAR NOT NULL,
+        applied_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+    """,
+)
+
+# متوافق مع الاسم القديم (كان يُصدَّر قبل فصل الترحيلات)
+SCHEMA_STATEMENTS: tuple[str, ...] = BASE_SCHEMA
+
+
+# ============================================
+# الترحيلات (Migrations)
+# ============================================
+# كل ترحيل = (رقم، اسم وصفي، عبارات SQL). تُطبَّق بالترتيب **مرة واحدة** ويُسجَّل
+# رقمها في `schema_migrations`. العبارات تبقى idempotent قدر الإمكان حتى يبقى
+# إعادة التطبيق على قاعدة قديمة (أُنشئت قبل نظام الترحيل) آمناً.
+MIGRATIONS: tuple[tuple[int, str, tuple[str, ...]], ...] = (
+    (
+        1,
+        "violations_source_and_manual_user",
+        (
+            # مصدر المخالفة (تلقائي/يدوي) — يحافظ على المخالفات اليدوية عند إعادة التحليل
+            "ALTER TABLE violations ADD COLUMN IF NOT EXISTS source VARCHAR DEFAULT 'auto';",
+            "ALTER TABLE violations ADD COLUMN IF NOT EXISTS manual_user VARCHAR;",
+            "CREATE INDEX IF NOT EXISTS idx_viol_source ON violations(source);",
+        ),
+    ),
+    (
+        2,
+        "audit_log",
+        (
+            "CREATE SEQUENCE IF NOT EXISTS seq_audit_id START 1;",
+            """
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id          INTEGER PRIMARY KEY DEFAULT nextval('seq_audit_id'),
+                entity      VARCHAR NOT NULL,
+                entity_id   INTEGER,
+                action      VARCHAR NOT NULL,
+                old_value   VARCHAR,
+                new_value   VARCHAR,
+                actor       VARCHAR,
+                occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id);",
+        ),
+    ),
 )
 
 
@@ -143,6 +195,7 @@ class Database:
         self._db_path = Path(db_path)
         self._read_only = read_only
         self._lock = threading.RLock()
+        self._in_transaction = False
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect_with_wal_recovery()
 
@@ -201,7 +254,8 @@ class Database:
         """يعيد أول صف من النتيجة، أو None."""
         with self._lock:
             cur = self._conn.execute(sql, params) if params is not None else self._conn.execute(sql)
-            return cur.fetchone()
+            row: tuple[Any, ...] | None = cur.fetchone()
+            return row
 
     def fetch_all(
         self, sql: str, params: tuple[Any, ...] | list[Any] | None = None
@@ -209,13 +263,95 @@ class Database:
         """يعيد كل الصفوف من النتيجة."""
         with self._lock:
             cur = self._conn.execute(sql, params) if params is not None else self._conn.execute(sql)
-            return cur.fetchall()
+            rows: list[tuple[Any, ...]] = cur.fetchall()
+            return rows
+
+    @contextmanager
+    def transaction(self) -> Iterator[Database]:
+        """يلفّ مجموعة عمليات في معاملة واحدة — إما تنجح كلها أو لا شيء.
+
+        يمنع الحالات الوسطى مثل «حُذفت المخالفات القديمة ثم فشل إدراج الجديدة».
+        القفل مُعاد الدخول (RLock) فالاستدعاءات المتداخلة لـ`execute` داخل الكتلة
+        تعمل من نفس الـthread بلا مشاكل.
+
+        تحذير: DuckDB يفرض القيود المرجعية عند الـcommit لا عند العبارة، فحذف
+        صف أب وأبنائه داخل معاملة واحدة يفشل — استخدم autocommit المتتابع هناك
+        (انظر `LibraryService.delete_video`).
+
+        مثال:
+            with db.transaction():
+                db.execute("DELETE FROM violations WHERE video_id = ?", (vid,))
+                db.executemany("INSERT INTO violations ...", rows)
+        """
+        with self._lock:
+            if self._in_transaction:
+                # معاملة متداخلة: نتركها للمعاملة الخارجية (لا savepoints هنا)
+                yield self
+                return
+            self._conn.begin()
+            self._in_transaction = True
+            try:
+                yield self
+            except BaseException:
+                try:
+                    self._conn.rollback()
+                finally:
+                    self._in_transaction = False
+                raise
+            self._conn.commit()
+            self._in_transaction = False
 
     def init_schema(self) -> None:
-        """ينشئ كل الجداول والفهارس إن لم تكن موجودة."""
+        """ينشئ المخطط الأساسي ثم يطبّق الترحيلات غير المُطبَّقة."""
         with self._lock:
-            for stmt in SCHEMA_STATEMENTS:
+            for stmt in BASE_SCHEMA:
                 self._conn.execute(stmt)
+            self._apply_migrations()
+
+    def _apply_migrations(self) -> None:
+        """يطبّق كل ترحيل لم يُسجَّل رقمه في `schema_migrations`."""
+        applied = {
+            int(r[0])
+            for r in self._conn.execute("SELECT version FROM schema_migrations").fetchall()
+        }
+        for version, name, statements in MIGRATIONS:
+            if version in applied:
+                continue
+            for stmt in statements:
+                self._conn.execute(stmt)
+            self._conn.execute(
+                "INSERT INTO schema_migrations (version, name) VALUES (?, ?)", (version, name)
+            )
+            logger.info("طُبِّق الترحيل %d — %s", version, name)
+
+    def applied_migrations(self) -> list[int]:
+        """أرقام الترحيلات المُطبَّقة (للتشخيص والاختبارات)."""
+        rows = self.fetch_all("SELECT version FROM schema_migrations ORDER BY version")
+        return [int(r[0]) for r in rows]
+
+    def record_audit(
+        self,
+        *,
+        entity: str,
+        entity_id: int | None,
+        action: str,
+        old_value: str | None = None,
+        new_value: str | None = None,
+        actor: str | None = None,
+    ) -> None:
+        """يسجّل حدثاً في سجل التدقيق — لا يرفع استثناءً أبداً.
+
+        سجل التدقيق مساعد وليس جزءاً من المسار الحرج: فشل الكتابة فيه يجب ألا
+        يُسقط العملية الأصلية (تحديث مراجعة، حذف مخالفة…).
+        """
+        try:
+            self.execute(
+                "INSERT INTO audit_log (entity, entity_id, action, old_value, new_value, actor) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (entity, entity_id, action, old_value, new_value, actor or current_actor()),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("تعذّر كتابة سجل التدقيق (%s/%s): %s", entity, action, exc)
 
     def table_exists(self, table_name: str) -> bool:
         """يتحقق من وجود جدول."""
@@ -243,6 +379,24 @@ class Database:
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
+
+
+# ============================================
+# هوية المُنفِّذ (للتدقيق)
+# ============================================
+def current_actor() -> str:
+    """اسم مستخدم نظام التشغيل الحالي — يُستعمل كـ«مُنفِّذ» في سجل التدقيق.
+
+    ⚠️ هذه **ليست هوية مُصادَقاً عليها**: التطبيق محلي أحادي المستخدم بلا نظام
+    دخول، والقيمة تأتي من بيئة العملية فيمكن انتحالها. تُستخدم كأثر تشغيلي
+    مساعد فقط، لا كإثبات لسلسلة عهدة. (موثَّق في README قسم «الخصوصية».)
+    """
+    import getpass
+
+    try:
+        return getpass.getuser()
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 # ============================================
