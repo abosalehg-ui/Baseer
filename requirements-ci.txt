@@ -13,7 +13,7 @@ scenedetect>=0.7.1,<0.8
 
 # الإعدادات
 python-dotenv>=1.0.0,<2
-pydantic>=2.8.0,<3
+pydantic>=2.13.4,<3
 pydantic-settings>=2.4.0,<3
 
 # الواجهة
