@@ -23,7 +23,7 @@ pyqtgraph>=0.13.0,<0.14
 # التصدير — تُشغَّل اختبارات Excel/PDF فعلياً بدل تخطّيها في CI
 openpyxl>=3.1.0,<4
 reportlab>=4.2.0,<5
-arabic-reshaper>=3.0.0,<4
+arabic-reshaper>=3.0.1,<4
 python-bidi>=0.5.0,<1
 
 # قيود على تبعيات غير مباشرة بثغرات معروفة (يكشفها pip-audit في CI).
