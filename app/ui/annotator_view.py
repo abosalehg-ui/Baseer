@@ -6,7 +6,6 @@ import html
 import logging
 import webbrowser
 from pathlib import Path
-from typing import Any
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -31,7 +30,7 @@ from app.constants import DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_IOU_THRESHOLD
 from app.core.analyzer import AnalysisConfig, AnalyzerService
 from app.core.annotator import AnnotatorService
 from app.core.library import LibraryService
-from app.workers.inference_worker import InferenceWorker
+from app.workers.inference_worker import InferenceReport, InferenceWorker
 from app.workers.runner import ThreadHandle, run_worker
 
 logger = logging.getLogger(__name__)
@@ -50,6 +49,10 @@ class AnnotatorView(QWidget):
         self._inference: ThreadHandle | None = None
         self._build_ui()
         self.refresh()
+
+    def background_handles(self) -> list[ThreadHandle]:
+        """مقابض العمّال الجارية — يقرأها `MainWindow.closeEvent` قبل إغلاق القاعدة."""
+        return [self._inference] if self._inference is not None else []
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -233,13 +236,33 @@ class AnnotatorView(QWidget):
         self._progress.setValue(current)
         self._status_label.setText(f"({current}/{total}) تحليل المقطع #{video_id}...")
 
-    def _on_inference_finished(self, results: list[Any]) -> None:
+    def _on_inference_finished(self, report: object) -> None:
         self._progress.setVisible(False)
-        self._status_label.setText(f"اكتمل استدلال {len(results)} مقطع")
         self._inference = None
         self._stop_btn.setEnabled(False)
         self._run_btn.setEnabled(True)
+        if not isinstance(report, InferenceReport):  # pragma: no cover - حماية توقيع الإشارة
+            self.refresh()
+            return
+
+        prefix = "أُوقف" if report.cancelled else "اكتمل"
+        status = f"{prefix} استدلال {len(report.results)} مقطع"
+        if report.failures:
+            status += f" • {len(report.failures)} إخفاق"
+        self._status_label.setText(status)
         self.refresh()
+        if report.failures:
+            self._show_inference_failures(report.failures)
+
+    def _show_inference_failures(self, failures: list[str]) -> None:
+        """يعرض المقاطع التي فشل استدلالها بدل تركها في السجل وحده."""
+        shown = failures[:10]
+        extra = "" if len(failures) <= 10 else f"\n\n(و{len(failures) - 10} إخفاقاً آخر في السجل)"
+        QMessageBox.warning(
+            self,
+            "اكتمل مع إخفاقات",
+            "تعذّر تحليل بعض المقاطع:\n\n• " + "\n• ".join(shown) + extra,
+        )
 
     def _on_inference_failed(self, message: str) -> None:
         self._progress.setVisible(False)

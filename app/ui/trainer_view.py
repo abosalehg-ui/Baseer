@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QThread
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
@@ -33,6 +33,7 @@ from app.core.trainer import (
     TrainerService,
     TrainResult,
 )
+from app.workers.runner import ThreadHandle, run_worker
 from app.workers.training_worker import TrainingWorker
 
 logger = logging.getLogger(__name__)
@@ -45,9 +46,12 @@ class TrainerView(QWidget):
         super().__init__(parent)
         self._settings = get_settings()
         self._service = TrainerService()
-        self._thread: QThread | None = None
-        self._worker: TrainingWorker | None = None
+        self._training: ThreadHandle | None = None
         self._build_ui()
+
+    def background_handles(self) -> list[ThreadHandle]:
+        """مقابض العمّال الجارية — يقرأها `MainWindow.closeEvent` قبل إغلاق القاعدة."""
+        return [self._training] if self._training is not None else []
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -172,7 +176,7 @@ class TrainerView(QWidget):
             self._ds_label.setText(path)
 
     def _on_start(self) -> None:
-        if self._thread is not None and self._thread.isRunning():
+        if self._training is not None and self._training.is_running():
             QMessageBox.information(self, "التدريب يعمل", "هناك تدريب جارٍ.")
             return
 
@@ -208,29 +212,20 @@ class TrainerView(QWidget):
         self._log.append(f"base: {config.base_model}")
         self._log.append(f"data: {config.dataset_yaml}")
 
-        thread = QThread(self)
-        worker = TrainingWorker(config, service=self._service)
-        worker.moveToThread(thread)
-
-        thread.started.connect(worker.run)
-        worker.epoch_done.connect(self._on_epoch)
-        worker.finished.connect(self._on_finished)
-        worker.failed.connect(self._on_failed)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.failed.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-
-        self._thread = thread
-        self._worker = worker
+        # نفس نمط بقية العمّال (`run_worker`): ربط ستّ إشارات يدوياً في كل view
+        # هو ما يضيّع `deleteLater` أو مرجع الـthread فتظهر انهيارات عشوائية.
+        self._training = run_worker(
+            TrainingWorker(config, service=self._service),
+            parent=self,
+            on_finished=self._on_finished,
+            on_failed=self._on_failed,
+            signal_bindings={"epoch_done": self._on_epoch},
+        )
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
-        thread.start()
 
     def _on_stop(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
+        if self._training is not None and self._training.cancel():
             self._status.setText("جارٍ الإيقاف بعد الـ epoch الحالي...")
             self._log.append("⏹ طُلب إيقاف التدريب")
             self._stop_btn.setEnabled(False)
@@ -251,8 +246,7 @@ class TrainerView(QWidget):
         self._log.append(f"best.pt: {result.best_pt}")
         if result.final_map50 is not None:
             self._log.append(f"mAP50 النهائية: {result.final_map50:.3f}")
-        self._thread = None
-        self._worker = None
+        self._training = None
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
 
@@ -263,8 +257,7 @@ class TrainerView(QWidget):
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         QMessageBox.critical(self, "فشل التدريب", message)
-        self._thread = None
-        self._worker = None
+        self._training = None
 
     def _on_evaluate(self) -> None:
         best = (

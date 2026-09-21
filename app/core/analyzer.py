@@ -5,13 +5,15 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from app.config import AppSettings, get_settings
 from app.constants import DEFAULT_CONFIDENCE_THRESHOLD, DEFAULT_IOU_THRESHOLD, VideoStatus
 from app.core.db import Database, get_database
+from app.core.model_integrity import verify_model_file
+from app.core.readiness import VideoReadiness, readiness_bulk, readiness_for
 
 logger = logging.getLogger(__name__)
 
@@ -51,51 +53,6 @@ class AnalysisResult:
     video_id: int
     total_frames: int
     detections_count: int
-
-
-@dataclass(frozen=True)
-class VideoReadiness:
-    """جاهزية مقطع لاستخراج المخالفات — أي متطلبات الكواشف متوفرة.
-
-    الكواشف تعود مبكراً بصمت عند غياب متطلبها، فهذا الملخّص يجعل السبب مرئياً
-    في الواجهة قبل أن يضغط المستخدم «استخراج» ويحصل على صفر بلا تفسير.
-    """
-
-    video_id: int
-    has_detections: bool
-    has_tracks: bool
-    zone_types: set[str] = field(default_factory=set)
-    has_calibration: bool = False
-    has_video_file: bool = False
-
-    @property
-    def blocked_detectors(self) -> list[str]:
-        """أسماء الكواشف المعطّلة عربياً مع سبب التعطيل."""
-        out: list[str] = []
-        if not self.has_tracks:
-            out.append("كل الكواشف (لا توجد tracks — فعّل التتبّع عند الاستدلال)")
-            return out
-        if "stop_line" not in self.zone_types:
-            out.append("قطع الإشارة الحمراء (تحتاج منطقة stop_line)")
-        if "no_parking" not in self.zone_types:
-            out.append("الوقوف الخاطئ (تحتاج منطقة no_parking)")
-        if "lane_line_solid" not in self.zone_types:
-            out.append("التجاوز الخاطئ (يحتاج خط lane_line_solid)")
-        if not self.has_calibration:
-            out.append("السرعة الزائدة والمسافة الآمنة (تحتاجان معايرة)")
-        if not self.has_video_file:
-            out.append("إساءة أنوار التلاقي (تحتاج ملف الفيديو)")
-        return out
-
-    @property
-    def summary(self) -> str:
-        """سطر مختصر للعرض في عمود «الجاهزية»."""
-        marks = [
-            f"tracks: {'✓' if self.has_tracks else '✗'}",
-            f"مناطق: {len(self.zone_types)}",
-            f"معايرة: {'✓' if self.has_calibration else '✗'}",
-        ]
-        return " • ".join(marks)
 
 
 # نوع الـ callable الذي يُجري الاستدلال الفعلي على ملف فيديو
@@ -138,8 +95,8 @@ class AnalyzerService:
 
         inference = self._inference_fn or _default_inference
         detections = list(inference(filepath, config))
+        # التخزين يضبط الحالة داخل المعاملة نفسها — لا تحديث منفصل بعدها
         self._store_detections(video_id, detections)
-        self._update_video_status(video_id, VideoStatus.PRELABELED)
 
         frames = len({d.frame_no for d in detections})
         logger.info(
@@ -163,9 +120,10 @@ class AnalyzerService:
                 progress_cb(index, len(video_ids), vid)
             try:
                 results.append(self.analyze_video(vid, config))
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
+                # المقطع الفاشل لا يُسقط الدفعة؛ السبب في السجل، والعامل
+                # (`workers/inference_worker.py`) يجمع الإخفاقات ويعرضها للمستخدم.
                 logger.exception("فشل تحليل المقطع %d", vid)
-                _ = exc
         return results
 
     def list_unanalyzed_video_ids(self) -> list[int]:
@@ -296,34 +254,11 @@ class AnalyzerService:
         كل كاشف يعود مبكراً بقائمة فارغة عند غياب متطلبه (منطقة/معايرة/tracks)،
         وهذا الفحص يجعل السبب مرئياً بدل الفشل الصامت.
         """
-        from app.core.calibration import CalibrationService
+        return readiness_for(self._db, video_id)
 
-        zone_rows = self._db.fetch_all(
-            "SELECT DISTINCT zone_type FROM zones WHERE video_id = ?", (video_id,)
-        )
-        zone_types = {str(r[0]) for r in zone_rows}
-
-        cal = CalibrationService(db=self._db).get_calibration(video_id)
-        tracked = self._db.fetch_one(
-            "SELECT COUNT(*) FROM detections WHERE video_id = ? AND track_id IS NOT NULL",
-            (video_id,),
-        )
-        filepath = self._video_filepath(video_id)
-        return VideoReadiness(
-            video_id=video_id,
-            has_detections=bool(
-                (
-                    self._db.fetch_one(
-                        "SELECT COUNT(*) FROM detections WHERE video_id = ?", (video_id,)
-                    )
-                    or (0,)
-                )[0]
-            ),
-            has_tracks=bool(tracked and tracked[0]),
-            zone_types=zone_types,
-            has_calibration=cal is not None and cal.meters_per_px > 0,
-            has_video_file=filepath is not None and Path(filepath).exists(),
-        )
+    def readiness_bulk(self, video_ids: list[int]) -> dict[int, VideoReadiness]:
+        """جاهزية دفعة مقاطع في أربعة استعلامات — للجداول (انظر `core/readiness.py`)."""
+        return readiness_bulk(self._db, video_ids)
 
     def _read_plates(
         self,
@@ -405,8 +340,13 @@ class AnalyzerService:
     # تخزين داخلي
     # ============================================
     def _store_detections(self, video_id: int, detections: Iterable[Detection]) -> None:
-        """يحذف الكشوفات السابقة ويُدرج الجديدة دفعةً واحدة."""
-        self._db.execute("DELETE FROM detections WHERE video_id = ?", (video_id,))
+        """يحذف الكشوفات السابقة ويُدرج الجديدة **في معاملة واحدة**.
+
+        بلا معاملة، أي فشل في `executemany` (قرص ممتلئ، صف تالف، إلغاء) يترك
+        المقطع بلا كشوفات بعد حذف القديمة — ومعها تضيع كل tracks المقطع فتعود
+        الكواشف بصفر مخالفة. نفس العيب أُصلح في `extract_violations` وبقي هنا،
+        وقائمة التحقق في `.github/pull_request_template.md` تنصّ على القاعدة.
+        """
         rows = [
             (
                 video_id,
@@ -422,20 +362,22 @@ class AnalyzerService:
             )
             for d in detections
         ]
-        if not rows:
-            return
-        self._db.executemany(
-            """
-            INSERT INTO detections
-                (video_id, frame_no, timestamp_ms, class_name, confidence,
-                 bbox_x1, bbox_y1, bbox_x2, bbox_y2, track_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-
-    def _update_video_status(self, video_id: int, status: VideoStatus) -> None:
-        self._db.execute("UPDATE videos SET status = ? WHERE id = ?", (status.value, video_id))
+        with self._db.transaction():
+            self._db.execute("DELETE FROM detections WHERE video_id = ?", (video_id,))
+            if rows:
+                self._db.executemany(
+                    """
+                    INSERT INTO detections
+                        (video_id, frame_no, timestamp_ms, class_name, confidence,
+                         bbox_x1, bbox_y1, bbox_x2, bbox_y2, track_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    rows,
+                )
+            self._db.execute(
+                "UPDATE videos SET status = ? WHERE id = ?",
+                (VideoStatus.PRELABELED.value, video_id),
+            )
 
 
 def _default_inference(filepath: Path, config: AnalysisConfig) -> Iterable[Detection]:
@@ -447,6 +389,10 @@ def _default_inference(filepath: Path, config: AnalysisConfig) -> Iterable[Detec
         from ultralytics import YOLO
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("يحتاج ultralytics — ثبّت requirements.txt") from exc
+
+    # ملف `.pt` حمولة pickle تُنفِّذ كوداً عند التحميل: نطابق بصمته المسجَّلة
+    # بجواره **قبل** تمريره لـYOLO. الاختلاف يرفع استثناءً ويمنع التحميل.
+    verify_model_file(config.model_path)
 
     model = YOLO(str(config.model_path))
     stream = model.track if config.enable_tracking else model.predict

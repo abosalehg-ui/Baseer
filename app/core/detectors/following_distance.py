@@ -5,7 +5,7 @@ from __future__ import annotations
 from app.constants import ViolationType
 from app.core.analyzer import Detection
 from app.core.violations import BaseViolationDetector, Track, ViolationCandidate, Zone
-from app.utils.geometry import speed_from_centers_kmh
+from app.utils.geometry import speed_from_timed_centers_kmh
 
 VEHICLE_CLASSES = ("vehicle", "motorcycle")
 
@@ -133,10 +133,13 @@ class FollowingDistanceDetector(BaseViolationDetector):
         if f_bottom_median <= l_bottom_median:
             return None  # follower أمام leader، نُلغي
 
-        # حساب السرعات (km/h)
-        assert self._meters_per_px is not None
-        v_follower_kmh = speed_from_centers_kmh(follower.centers, fps, self._meters_per_px)
-        v_leader_kmh = speed_from_centers_kmh(leader.centers, fps, self._meters_per_px)
+        # حساب السرعات (km/h) من التوقيتات الحقيقية — لا من fps × عدد المراكز،
+        # وإلا تُضرَب السرعتان في `frame_stride` ويتضخّم TTC المبني عليهما.
+        meters_per_px = self._meters_per_px
+        if meters_per_px is None:
+            return None
+        v_follower_kmh = speed_from_timed_centers_kmh(follower.timed_centers, meters_per_px)
+        v_leader_kmh = speed_from_timed_centers_kmh(leader.timed_centers, meters_per_px)
         if v_follower_kmh < self._min_speed_kmh:
             return None
 
@@ -151,7 +154,7 @@ class FollowingDistanceDetector(BaseViolationDetector):
             fb = follower_by_frame[f].bbox
             # gap_px = أعلى follower - أسفل leader (الـ y يزداد للأسفل في إحداثيات الصورة)
             gap_px = max(0.0, fb[1] - lb[3])
-            gap_m = gap_px * self._meters_per_px
+            gap_m = gap_px * meters_per_px
             ttc = gap_m / rel_speed_mps if rel_speed_mps > 0 else float("inf")
             half_speed_rule_m = 0.5 * v_follower_kmh
             if ttc < self._ttc_threshold_sec or gap_m < half_speed_rule_m:
@@ -169,7 +172,7 @@ class FollowingDistanceDetector(BaseViolationDetector):
         last_f = unsafe_frames[-1]
         last_gap_m = (
             max(0.0, follower_by_frame[last_f].bbox[1] - leader_by_frame[last_f].bbox[3])
-            * self._meters_per_px
+            * meters_per_px
         )
         last_ttc = last_gap_m / rel_speed_mps if rel_speed_mps > 0 else float("inf")
 

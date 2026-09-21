@@ -22,43 +22,9 @@ from app.ui.dashboard_view import DashboardView
 from app.ui.library_view import LibraryView
 from app.ui.theme import MIN_WINDOW_HEIGHT, MIN_WINDOW_WIDTH
 from app.ui.trainer_view import TrainerView
+from app.workers.runner import ThreadHandle, cancel_and_wait
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================
-# تبويب placeholder بسيط للأسبوع 1
-# ============================================
-class PlaceholderTab(QWidget):
-    """تبويب مؤقت يعرض اسم الوحدة وحالتها."""
-
-    def __init__(self, title: str, description: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        title_lbl = QLabel(title, self)
-        title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title_font = title_lbl.font()
-        title_font.setPointSize(24)
-        title_font.setBold(True)
-        title_lbl.setFont(title_font)
-
-        desc_lbl = QLabel(description, self)
-        desc_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        desc_lbl.setWordWrap(True)
-
-        status_lbl = QLabel("قيد التطوير — هذه الوحدة ستُفعَّل في مرحلة لاحقة", self)
-        status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        status_lbl.setProperty("role", "hint")
-
-        layout.addStretch()
-        layout.addWidget(title_lbl)
-        layout.addSpacing(12)
-        layout.addWidget(desc_lbl)
-        layout.addSpacing(24)
-        layout.addWidget(status_lbl)
-        layout.addStretch()
 
 
 # ============================================
@@ -178,12 +144,33 @@ class MainWindow(QMainWindow):
         status.showMessage("جاهز")
         self.setStatusBar(status)
 
+    def background_handles(self) -> list[ThreadHandle]:
+        """كل مقابض العمّال الجارية في التبويبات المبنية."""
+        handles: list[ThreadHandle] = []
+        for view in self._built_tabs.values():
+            getter = getattr(view, "background_handles", None)
+            if callable(getter):
+                handles.extend(getter())
+        return handles
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
-        """يُغلق اتصال قاعدة البيانات المفرد عند الخروج لتفريغ الـ WAL بأمان.
+        """يُنهي العمّال الجارية **ثم** يُغلق اتصال القاعدة المفرد.
 
         ترك الاتصال مفتوحاً عند إغلاق مفاجئ كان يخلّف WAL بحالة وسطى — وهو
-        السيناريو الذي استلزم آلية التعافي في db.py.
+        السيناريو الذي استلزم آلية التعافي في db.py. لكن إغلاقه **وعامل يعمل**
+        أسوأ: العامل يُنفّذ استعلامات على اتصال مُغلق، ويُدمَّر الـQThread وهو
+        يعمل. فنُلغي وننتظر أولاً (وننبّه المستخدم أن هذا ما يجري).
         """
+        try:
+            stopped = cancel_and_wait(self.background_handles())
+            if stopped:
+                status = self.statusBar()
+                if status is not None:
+                    status.showMessage(f"جارٍ إنهاء {stopped} عملية قبل الخروج...")
+                logger.info("أُنهيت %d عملية خلفية قبل الخروج", stopped)
+        except Exception:  # noqa: BLE001
+            logger.exception("تعذّر إنهاء العمليات الخلفية عند الخروج")
+
         try:
             from app.core.db import reset_database_singleton
 

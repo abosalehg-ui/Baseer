@@ -69,6 +69,15 @@ class Track:
         return [bbox_center(d.bbox) for d in self.detections]
 
     @property
+    def timed_centers(self) -> list[tuple[Point, int]]:
+        """المراكز مقترنة بتوقيت كل كشف (ms) — لحساب سرعة لا يتأثر بـ`frame_stride`.
+
+        `centers` وحدها تُخفي المدّة الحقيقية: عند stride>1 تفصل المركزين
+        المتتاليين عدة إطارات، فحساب السرعة من عددها ÷ fps يُبالغ بمعامل stride.
+        """
+        return [(bbox_center(d.bbox), d.timestamp_ms) for d in self.detections]
+
+    @property
     def duration_ms(self) -> int:
         return self.end_ms - self.start_ms
 

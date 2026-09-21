@@ -88,12 +88,30 @@ class OCRService:
         *,
         recognize_fn: RecognizeCallable | None = None,
         lang: str = "ar",
-        use_gpu: bool = True,
+        use_gpu: bool | None = None,
     ) -> None:
+        """`use_gpu=None` (الافتراضي) يعني: اقرأ من الإعدادات، وارجع لـCPU عند الفشل.
+
+        كان `use_gpu=True` ثابتاً بلا أي رجوع: على جهاز بلا CUDA يفشل إنشاء
+        محرّك PaddleOCR، ويُبتلع الاستثناء في `_safe_read`، فيبقى عمود اللوحات
+        فارغاً **بلا أي رسالة** ويظن المستخدم أن القراءة «لا تعمل».
+        """
         self._recognize_fn = recognize_fn
         self._lang = lang
-        self._use_gpu = use_gpu
+        self._use_gpu = self._resolve_use_gpu(use_gpu)
         self._paddle_engine: Any = None
+        self._gpu_fallback_warned = False
+
+    @staticmethod
+    def _resolve_use_gpu(explicit: bool | None) -> bool:
+        if explicit is not None:
+            return explicit
+        try:
+            from app.config import get_settings
+
+            return get_settings().cuda_device >= 0
+        except Exception:  # noqa: BLE001 - إعدادات معطوبة لا تُسقط القراءة
+            return True
 
     def read_image(self, image_path: Path | str) -> OCRResult:
         """يقرأ كل النصوص في صورة ويُرجع أعلاها ثقة."""
@@ -197,10 +215,31 @@ class OCRService:
             from paddleocr import PaddleOCR
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("يحتاج paddleocr — ثبّت requirements.txt") from exc
-        self._paddle_engine = PaddleOCR(
-            use_angle_cls=True, lang=self._lang, use_gpu=self._use_gpu, show_log=False
-        )
+
+        try:
+            self._paddle_engine = PaddleOCR(
+                use_angle_cls=True, lang=self._lang, use_gpu=self._use_gpu, show_log=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not self._use_gpu:
+                raise
+            # الرجوع إلى CPU بدل صمت تام: القراءة أبطأ لكنها تعمل
+            logger.warning(
+                "تعذّر تهيئة PaddleOCR على GPU (%s) — نرجع إلى CPU (أبطأ). "
+                "تأكّد من CUDA وتطابق نسخة paddlepaddle-gpu إن أردت التسريع.",
+                exc,
+            )
+            self._use_gpu = False
+            self._gpu_fallback_warned = True
+            self._paddle_engine = PaddleOCR(
+                use_angle_cls=True, lang=self._lang, use_gpu=False, show_log=False
+            )
         return self._paddle_engine
+
+    @property
+    def gpu_fallback_warned(self) -> bool:
+        """هل رجعنا إلى CPU بعد فشل GPU؟ — لتُظهره الواجهة مرة واحدة."""
+        return self._gpu_fallback_warned
 
     @staticmethod
     def _best_reading(readings: list[tuple[str, float]]) -> OCRResult:

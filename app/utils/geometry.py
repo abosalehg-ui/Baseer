@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -192,18 +192,32 @@ def is_stationary(points: list[Point], threshold_px: float = 5.0) -> bool:
     return all(euclidean_distance((cx, cy), p) <= threshold_px for p in points)
 
 
-def speed_from_centers_kmh(centers: list[Point], fps: float, meters_per_px: float) -> float:
-    """يقدّر متوسط السرعة بالكم/ساعة من مسار مراكز bbox عبر فريمات متعاقبة.
+def speed_from_timed_centers_kmh(
+    samples: Sequence[tuple[Point, int]], meters_per_px: float
+) -> float:
+    """يقدّر متوسط السرعة (كم/س) من مراكز مقترنة **بتوقيتاتها الحقيقية** بالمللي ثانية.
+
+    النسخة السابقة (`speed_from_centers_kmh`) كانت تحسب الزمن كـ
+    `(عدد المراكز − 1) ÷ fps`، أي تفترض أن بين كل مركزين **إطاراً واحداً**. هذا
+    يصحّ فقط عند `frame_stride = 1`. الواجهة تعرض stride حتى 30
+    (`annotator_view._stride_spin`)، والمُحلِّل يحتفظ بأرقام الإطارات الحقيقية
+    (`real_frame_no = kept_idx * stride`) — فالمراكز المتتالية تفصلها `stride`
+    إطاراً لا إطار واحد، وكانت السرعة تُضرَب في stride:
+    سيارة بـ54 كم/س تُحسب 270 كم/س عند stride=5، فتُسجَّل «سرعة زائدة» كاذبة
+    لكل مركبة ويتلوّث معها كاشف المسافة الآمنة (يبني TTC على السرعتين).
+
+    التوقيت المخزَّن في كل كشف (`timestamp_ms`) صحيح أصلاً لأنه يُحسب من رقم
+    الإطار الحقيقي، فاستخدامه يُغلق الباب على هذا الصنف من الخطأ نهائياً بدل
+    تمرير stride إلى كل كاشف.
 
     مختلف عن `calibration.estimate_speed_kmh` الذي يأخذ إزاحة ومدّة جاهزتين.
     """
-    if fps <= 0 or meters_per_px <= 0 or len(centers) < 2:
+    if meters_per_px <= 0 or len(samples) < 2:
         return 0.0
-    total_px = sum(euclidean_distance(centers[i], centers[i + 1]) for i in range(len(centers) - 1))
-    n_intervals = len(centers) - 1
-    dt_s = n_intervals / fps
+    dt_s = (samples[-1][1] - samples[0][1]) / 1000.0
     if dt_s <= 0:
         return 0.0
+    total_px = total_path_length(point for point, _ms in samples)
     return (total_px * meters_per_px / dt_s) * 3.6
 
 

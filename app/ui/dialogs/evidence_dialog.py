@@ -154,18 +154,29 @@ class EvidenceDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         root.addWidget(close_btn)
 
+    def _require_row(self) -> dict[str, Any]:
+        """صف المخالفة، أو استثناء صريح.
+
+        كان `assert self._row is not None` في ثلاثة مواضع — و`assert` يُحذف
+        بـ`python -O` فيتحوّل العقد إلى `TypeError` غامض في بناء مُحسَّن.
+        الدوالّ الثلاث لا تُستدعى إلا بعد فحص `_row` في `_build_ui`.
+        """
+        if self._row is None:  # pragma: no cover - محروس في _build_ui
+            raise RuntimeError("لا توجد بيانات مخالفة لعرضها")
+        return self._row
+
     def _summary_text(self) -> str:
-        assert self._row is not None
-        plate = self._row["license_plate"] or "—"
+        row = self._require_row()
+        plate = row["license_plate"] or "—"
         return (
-            f"<b>الملف:</b> {self._row['filename']} &nbsp;|&nbsp; "
-            f"<b>البداية:</b> {self._row['start_ms']} ms &nbsp;|&nbsp; "
-            f"<b>اللوحة:</b> {plate}<br>{self._row['notes'] or ''}"
+            f"<b>الملف:</b> {row['filename']} &nbsp;|&nbsp; "
+            f"<b>البداية:</b> {row['start_ms']} ms &nbsp;|&nbsp; "
+            f"<b>اللوحة:</b> {plate}<br>{row['notes'] or ''}"
         )
 
     def _try_build_player(self) -> QWidget | None:
-        assert self._row is not None
-        filepath = self._row["filepath"]
+        row = self._require_row()
+        filepath = row["filepath"]
         if not filepath or not Path(filepath).exists():
             return None
         try:
@@ -173,22 +184,22 @@ class EvidenceDialog(QDialog):
 
             player = VideoPlayer(self)
             player.load(filepath)
-            player.seek(self._row["start_ms"])
+            player.seek(row["start_ms"])
             return player
         except Exception as exc:  # noqa: BLE001
             logger.warning("تعذّر بناء مشغّل الأدلة: %s", exc)
             return None
 
     def _build_thumbnails(self) -> QWidget:
-        assert self._row is not None
+        row = self._require_row()
         area = QScrollArea(self)
         area.setWidgetResizable(True)
         container = QWidget()
         layout = QHBoxLayout(container)
 
-        frame_nos = evidence_frame_numbers(self._row["evidence_frames"])
+        frame_nos = evidence_frame_numbers(row["evidence_frames"])
         pairs = extract_evidence_images(
-            self._row["filepath"], frame_nos, provider_factory=self._provider_factory
+            row["filepath"], frame_nos, provider_factory=self._provider_factory
         )
         if not pairs:
             layout.addWidget(QLabel("لا تتوفّر إطارات إثبات.", container))

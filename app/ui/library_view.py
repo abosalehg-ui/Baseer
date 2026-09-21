@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import logging
+from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
@@ -25,6 +26,7 @@ from PyQt6.QtWidgets import (
 
 from app.constants import SOURCE_ARABIC_NAMES, SourceType
 from app.core.library import ImportReport, LibraryService, VideoDetails
+from app.ui.theme import COMFORTABLE_TOUCH_TARGET
 from app.ui.widgets.thumbnail_grid import ThumbnailGrid, VideoCard
 from app.ui.widgets.video_player import VideoPlayer
 from app.workers.import_worker import ImportWorker
@@ -45,6 +47,7 @@ class LibraryView(QWidget):
         super().__init__(parent)
         self._service = service or LibraryService()
         self._import: ThreadHandle | None = None
+        self._selected_video_id: int | None = None
         # مؤقّت تجميع: البحث كان يعيد بناء الشبكة كاملة عند كل حرف
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -53,6 +56,10 @@ class LibraryView(QWidget):
         self._build_ui()
         self.setAcceptDrops(True)
         self.refresh()
+
+    def background_handles(self) -> list[ThreadHandle]:
+        """مقابض العمّال الجارية — يقرأها `MainWindow.closeEvent` قبل إغلاق القاعدة."""
+        return [self._import] if self._import is not None else []
 
     # ============================================
     # بناء الواجهة
@@ -167,7 +174,95 @@ class LibraryView(QWidget):
         self._details_label.setAlignment(Qt.AlignmentFlag.AlignTop)
         layout.addWidget(self._details_label, stretch=1)
 
+        layout.addLayout(self._build_video_actions(panel))
         return panel
+
+    def _build_video_actions(self, panel: QWidget) -> QHBoxLayout:
+        """أفعال المقطع المختار: تاريخ التسجيل والحذف.
+
+        `LibraryService.delete_video()` كانت مكتوبة ومختبَرة ولا يستدعيها من
+        الواجهة إلا حوار التكرارات — فمن استورد مقطعاً بالخطأ، أو أراد حذفه
+        لسبب خصوصية (طلب متوقَّع تماماً في تطبيق يخزّن بيانات شخصية)، لم يكن
+        أمامه إلا تحرير القاعدة يدوياً.
+        """
+        bar = QHBoxLayout()
+        self._recorded_at_btn = QPushButton("📅 تاريخ التسجيل", panel)
+        self._recorded_at_btn.setToolTip(
+            "تعيين تاريخ تسجيل المقطع — لازم لدخوله في الرسوم الزمنية بالداشبورد"
+        )
+        self._recorded_at_btn.setAccessibleName("تعيين تاريخ تسجيل المقطع المختار")
+        self._recorded_at_btn.setMinimumHeight(COMFORTABLE_TOUCH_TARGET)
+        self._recorded_at_btn.setEnabled(False)
+        self._recorded_at_btn.clicked.connect(self._on_set_recorded_at)
+        bar.addWidget(self._recorded_at_btn)
+
+        self._delete_btn = QPushButton("🗑️ حذف المقطع", panel)
+        self._delete_btn.setToolTip("يحذف سجلات المقطع من القاعدة — لا يحذف ملف الفيديو")
+        self._delete_btn.setAccessibleName("حذف المقطع المختار من المكتبة")
+        self._delete_btn.setMinimumHeight(COMFORTABLE_TOUCH_TARGET)
+        self._delete_btn.setEnabled(False)
+        self._delete_btn.clicked.connect(self._on_delete_video)
+        bar.addWidget(self._delete_btn)
+        return bar
+
+    def _on_set_recorded_at(self) -> None:
+        """يعيّن تاريخ تسجيل المقطع المختار."""
+        details = self._current_details()
+        if details is None:
+            return
+        from app.ui.dialogs.recorded_at_dialog import RecordedAtDialog
+
+        current = details.recorded_at if isinstance(details.recorded_at, datetime) else None
+        dlg = RecordedAtDialog(filename=details.filename, current=current, parent=self)
+        if dlg.exec() != RecordedAtDialog.DialogCode.Accepted:
+            return
+        try:
+            self._service.update_recorded_at(details.id, dlg.value())
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("فشل تعيين تاريخ التسجيل")
+            QMessageBox.critical(self, "فشل الحفظ", str(exc))
+            return
+        self._status_label.setText(f"حُدِّث تاريخ تسجيل {details.filename}")
+        self._on_card_activated(details.id)
+
+    def _on_delete_video(self) -> None:
+        """يحذف المقطع المختار بعد تأكيد يوضّح ما يُحذف وما يبقى."""
+        details = self._current_details()
+        if details is None:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "تأكيد حذف المقطع",
+            f"<b>حذف «{html.escape(details.filename)}» من المكتبة؟</b><br><br>"
+            "تُحذف سجلات القاعدة (الكشوفات، المخالفات، المناطق، المعايرة) "
+            "والصورة المصغّرة.<br><br>"
+            "⚠️ <b>ملف الفيديو الأصلي يبقى على القرص</b> — احذفه يدوياً إن أردت "
+            "إزالة محتواه فعلياً.<br><br>لا يمكن التراجع.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._service.delete_video(details.id)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("فشل حذف المقطع")
+            QMessageBox.critical(self, "فشل الحذف", str(exc))
+            return
+        self._selected_video_id = None
+        self._set_video_actions_enabled(False)
+        self._details_label.setText("اختر مقطعاً لعرض تفاصيله")
+        self.refresh()
+        self._status_label.setText(f"حُذف المقطع «{details.filename}» من المكتبة")
+
+    def _current_details(self) -> VideoDetails | None:
+        """تفاصيل المقطع المختار، أو None لو لم يُختر شيء أو حُذف."""
+        if self._selected_video_id is None:
+            return None
+        return self._service.get_video_details(self._selected_video_id)
+
+    def _set_video_actions_enabled(self, enabled: bool) -> None:
+        self._recorded_at_btn.setEnabled(enabled)
+        self._delete_btn.setEnabled(enabled)
 
     # ============================================
     # السحب والإفلات
@@ -334,6 +429,8 @@ class LibraryView(QWidget):
         details = self._service.get_video_details(video_id)
         if details is None:
             return
+        self._selected_video_id = video_id
+        self._set_video_actions_enabled(True)
         self._player.load(details.filepath)
         self._details_label.setText(self._format_details(details))
 

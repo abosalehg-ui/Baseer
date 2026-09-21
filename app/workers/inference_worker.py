@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
@@ -11,11 +12,27 @@ from app.core.analyzer import AnalysisConfig, AnalysisResult, AnalyzerService
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class InferenceReport:
+    """ملخّص دفعة استدلال — النتائج **والإخفاقات** معاً.
+
+    الإشارة كانت تحمل قائمة النتائج الناجحة وحدها، فالإخفاقات تُسجَّل في الـlog
+    وتختفي: مستخدم يُشغّل الاستدلال على 50 مقطعاً ويفشل 20 منها (نموذج ناقص،
+    ملف محذوف، CUDA OOM، بصمة نموذج لا تطابق) يرى «اكتمل استدلال 30 مقطع» ولا
+    يعرف أن ثلث العمل سقط ولا أيّ مقطع. تبويب التحليل يعرض إخفاقاته أصلاً
+    (`_show_failures`) — هذا يوحّد السلوك.
+    """
+
+    results: list[AnalysisResult] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    cancelled: bool = False
+
+
 class InferenceWorker(QObject):
     """يُجري الاستدلال على دفعة مقاطع في thread منفصل."""
 
     progress = pyqtSignal(int, int, int)  # current, total, video_id
-    finished = pyqtSignal(object)  # list[AnalysisResult]
+    finished = pyqtSignal(object)  # InferenceReport
     failed = pyqtSignal(str)
 
     def __init__(
@@ -38,6 +55,7 @@ class InferenceWorker(QObject):
         try:
             service = self._service or AnalyzerService()
             results: list[AnalysisResult] = []
+            failures: list[str] = []
             for index, vid in enumerate(self._video_ids, start=1):
                 if self._cancelled:
                     break
@@ -46,10 +64,13 @@ class InferenceWorker(QObject):
                     results.append(service.analyze_video(vid, self._config))
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("فشل تحليل المقطع %d: %s", vid, exc)
-            self.finished.emit(results)
+                    failures.append(f"المقطع #{vid}: {exc}")
+            self.finished.emit(
+                InferenceReport(results=results, failures=failures, cancelled=self._cancelled)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception("فشل عامل الاستدلال")
             self.failed.emit(str(exc))
 
 
-__all__ = ["InferenceWorker"]
+__all__ = ["InferenceReport", "InferenceWorker"]

@@ -81,7 +81,8 @@ class ZoneService:
         row = self._db.fetch_one(
             "SELECT id FROM zones WHERE video_id = ? ORDER BY id DESC LIMIT 1", (video_id,)
         )
-        assert row is not None
+        if row is None:  # pragma: no cover - إدراج نجح ثم لم يُقرأ صفّه
+            raise RuntimeError(f"أُدرجت المنطقة ولم يُعد صفّها (المقطع {video_id})")
         return int(row[0])
 
     def list_zones(self, video_id: int) -> list[ZoneRecord]:

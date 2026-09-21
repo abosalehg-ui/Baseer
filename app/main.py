@@ -14,7 +14,7 @@ from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from app import __app_name_en__
-from app.config import ensure_directories, get_settings
+from app.config import ensure_anon_salt, ensure_directories, get_settings
 from app.core.db import get_database
 from app.ui.main_window import MainWindow
 from app.ui.theme import apply_theme
@@ -61,6 +61,10 @@ def main() -> int:
     try:
         settings = get_settings()
         ensure_directories(settings)
+        # ملح تجهيل خاص بهذا التثبيت: مع الملح الافتراضي المنشور تكون رموز
+        # اللوحات المُصدَّرة قابلة للعكس بجدول أقواس (فضاء اللوحة ≈10⁷).
+        ensure_anon_salt(settings)
+        settings = get_settings()
         logger.info("بدء تشغيل بَصير — مسار البيانات: %s", settings.data_dir)
 
         db = get_database(settings)
