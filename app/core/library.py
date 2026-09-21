@@ -6,6 +6,7 @@ import hashlib
 import logging
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +16,10 @@ from app.constants import (
     SUPPORTED_VIDEO_EXTENSIONS,
     SourceType,
 )
+from app.core import duplicates
 from app.core.db import Database, get_database
-from app.utils.hash_utils import file_hash, perceptual_hash_from_image_path, phash_distance
+from app.core.duplicates import DuplicateGroup, confirmed_duplicate, find_duplicate_groups
+from app.utils.hash_utils import file_hash, perceptual_hash_from_image_path
 from app.utils.video_utils import VideoMetadata, extract_metadata, generate_thumbnail
 
 logger = logging.getLogger(__name__)
@@ -40,15 +43,6 @@ class ImportReport:
     @property
     def total(self) -> int:
         return len(self.imported) + len(self.duplicates) + len(self.failed) + len(self.skipped)
-
-
-@dataclass
-class DuplicateGroup:
-    """مجموعة مقاطع متطابقة."""
-
-    representative_id: int
-    duplicate_ids: list[int]
-    match_type: str  # "exact" | "perceptual"
 
 
 @dataclass(frozen=True)
@@ -175,9 +169,15 @@ class LibraryService:
         try:
             meta = extract_metadata(file_path)
             fhash = file_hash(file_path)
+
+            # فحص التكرار **قبل** توليد الـthumbnail: كان بعده، فكل ملف مكرر
+            # يترك صورة مصغّرة يتيمة على القرص بلا صف في القاعدة يشير إليها.
+            if confirmed_duplicate(self._db, file_path, fhash):
+                report.duplicates.append(file_path)
+                return
+
             phash: str | None = None
             thumb_path: Path | None = None
-
             if generate_thumbnails:
                 thumb_path = self._build_thumbnail(file_path, meta)
                 if thumb_path is not None:
@@ -185,10 +185,6 @@ class LibraryService:
                         phash = perceptual_hash_from_image_path(thumb_path)
                     except Exception as exc:  # noqa: BLE001
                         logger.warning("فشل حساب phash لـ %s: %s", file_path.name, exc)
-
-            if self._is_exact_duplicate(fhash):
-                report.duplicates.append(file_path)
-                return
 
             video_id = self._insert_video(file_path, source, meta, fhash, phash, thumb_path)
             report.imported.append(video_id)
@@ -254,17 +250,9 @@ class LibraryService:
         row = self._db.fetch_one(
             "SELECT id FROM videos WHERE filepath = ?", (str(file_path.resolve()),)
         )
-        assert row is not None
+        if row is None:  # pragma: no cover - إدراج نجح ثم لم يُقرأ صفّه
+            raise RuntimeError(f"أُدرج المقطع ولم يُعد صفّه: {file_path}")
         return int(row[0])
-
-    def _is_exact_duplicate(self, fhash: str) -> bool:
-        """يفحص التكرار الثنائي الحقيقي (file_hash) فقط — أساس الإسقاط التلقائي الآمن.
-
-        التكرار الحسّي (phash) لا يُسقط المقطع تلقائياً لتجنّب رفض مقاطع CCTV
-        المختلفة من كاميرا ثابتة بصمت؛ يُعرض بدلاً من ذلك في `detect_duplicates()`
-        للمراجعة البشرية.
-        """
-        return self._db.fetch_one("SELECT id FROM videos WHERE file_hash = ?", (fhash,)) is not None
 
     # ============================================
     # الاستعلام والإدارة
@@ -415,87 +403,37 @@ class LibraryService:
         )
         return [(int(r[0]), str(r[1]), str(r[2]), int(r[3]), int(r[4])) for r in rows]
 
+    def update_recorded_at(self, video_id: int, moment: datetime | None) -> None:
+        """يعيّن تاريخ تسجيل المقطع (أو يمحوه) مع أثر تدقيق.
+
+        `recorded_at` يأتي من tags الفيديو وهي غائبة في أكثر المصادر الواقعية،
+        وكل التجميعات الزمنية في الداشبورد تشترطه — فإدخاله يدوياً هو ما يُدخل
+        المقطع في التحليل الزمني بدل استثنائه بصمت.
+        """
+        previous = self._db.fetch_one("SELECT recorded_at FROM videos WHERE id = ?", (video_id,))
+        self._db.execute("UPDATE videos SET recorded_at = ? WHERE id = ?", (moment, video_id))
+        self._db.record_audit(
+            entity="video",
+            entity_id=video_id,
+            action="set_recorded_at",
+            old_value=str(previous[0]) if previous and previous[0] is not None else None,
+            new_value=moment.isoformat() if moment is not None else None,
+        )
+
     def update_source_type(self, video_id: int, source_type: SourceType | str) -> None:
         """يحدّث نوع المصدر."""
         source = source_type.value if isinstance(source_type, SourceType) else source_type
         self._db.execute("UPDATE videos SET source_type = ? WHERE id = ?", (source, video_id))
 
     # ============================================
-    # كشف التكرار
+    # كشف التكرار (المنطق في `app/core/duplicates.py`)
     # ============================================
-    # عتبة مسافة Hamming للتشابه البصري (phash بطول 16×16 بت = 256 بت).
-    # القيمة محافظة عمداً: كلما ارتفعت زاد التقاط المتشابهات وزادت الإيجابيات
-    # الكاذبة. النتائج تُراجَع بشرياً في DuplicatesDialog ولا تُحذف تلقائياً.
-    PHASH_MAX_DISTANCE: int = 10
+    # مُعاد تصديرها للتوافق مع المستدعين — المصدر في `app/core/duplicates.py`
+    PHASH_MAX_DISTANCE: int = duplicates.PHASH_MAX_DISTANCE
 
     def detect_duplicates(self, *, phash_max_distance: int | None = None) -> list[DuplicateGroup]:
-        """يكشف التكرارات: تطابق ثنائي (file_hash) + تشابه بصري (مسافة phash).
-
-        التشابه البصري يُقاس بمسافة Hamming لا بالتساوي التام: نسختان من نفس
-        المقطع بجودة/ترميز مختلف تُعطيان phash **متقارباً لا متطابقاً**، فالتجميع
-        بالتساوي كان يفوّت تماماً الحالة التي وُجدت الميزة من أجلها.
-        """
-        threshold = self.PHASH_MAX_DISTANCE if phash_max_distance is None else phash_max_distance
-        groups: list[DuplicateGroup] = []
-
-        exact = self._db.fetch_all(
-            "SELECT file_hash, ARRAY_AGG(id ORDER BY id) "
-            "FROM videos WHERE file_hash IS NOT NULL "
-            "GROUP BY file_hash HAVING COUNT(*) > 1"
-        )
-        for _hash, ids in exact:
-            ids_list = list(ids)
-            groups.append(
-                DuplicateGroup(
-                    representative_id=int(ids_list[0]),
-                    duplicate_ids=[int(i) for i in ids_list[1:]],
-                    match_type="exact",
-                )
-            )
-
-        seen = {gid for g in groups for gid in [g.representative_id, *g.duplicate_ids]}
-        rows = self._db.fetch_all(
-            "SELECT id, phash FROM videos WHERE phash IS NOT NULL ORDER BY id"
-        )
-        candidates = [(int(r[0]), str(r[1])) for r in rows if int(r[0]) not in seen]
-        groups.extend(self._group_by_phash_distance(candidates, threshold))
-        return groups
-
-    @staticmethod
-    def _group_by_phash_distance(
-        candidates: list[tuple[int, str]], threshold: int
-    ) -> list[DuplicateGroup]:
-        """يجمّع المقاطع المتقاربة بصرياً (تجميع جشِع حول ممثِّل).
-
-        نمشي بالترتيب: أول مقطع غير مُخصَّص يصير ممثِّلاً، ونضم إليه كل من
-        مسافته منه ≤ العتبة. بسيط وحتمي وكافٍ لأحجام مكتبة سطح المكتب.
-        """
-        assigned: set[int] = set()
-        out: list[DuplicateGroup] = []
-        for i, (vid, phash) in enumerate(candidates):
-            if vid in assigned:
-                continue
-            members: list[int] = []
-            for other_id, other_hash in candidates[i + 1 :]:
-                if other_id in assigned:
-                    continue
-                try:
-                    distance = phash_distance(phash, other_hash)
-                except (ValueError, TypeError):
-                    continue  # phash تالف — نتخطاه بدل إسقاط الفحص كله
-                if distance <= threshold:
-                    members.append(other_id)
-                    assigned.add(other_id)
-            if members:
-                assigned.add(vid)
-                out.append(
-                    DuplicateGroup(
-                        representative_id=vid,
-                        duplicate_ids=members,
-                        match_type="perceptual",
-                    )
-                )
-        return out
+        """يكشف التكرارات: تطابق ثنائي (file_hash) + تشابه بصري (مسافة phash)."""
+        return find_duplicate_groups(self._db, phash_max_distance=phash_max_distance)
 
     # ============================================
     # مساعدات داخلية

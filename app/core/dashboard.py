@@ -14,6 +14,13 @@ from app.core.db import Database, current_actor, get_database
 logger = logging.getLogger(__name__)
 
 
+# لحظة المخالفة الحقيقية = وقت تسجيل المقطع + إزاحة المخالفة داخله.
+# التجميع على `v.recorded_at` وحده كان ينسب **كل** مخالفات مقطع CCTV مدّته ثلاث
+# ساعات إلى ساعة بدايته، فتخرج خريطة «أيام × ساعات» مضلِّلة. التعبير ثابت داخلي
+# لا يُبنى من مدخل مستخدم.
+_VIOLATION_MOMENT = "(v.recorded_at + to_seconds(CAST(vi.start_ms / 1000 AS BIGINT)))"
+
+
 # ============================================
 # هياكل البيانات
 # ============================================
@@ -43,6 +50,26 @@ class ViolationRow:
     review_status: str
     notes: str | None
     created_at: datetime | None
+
+
+@dataclass(frozen=True)
+class EditableViolationRow:
+    """صف مخالفة لجدول التحرير — بحقول مُسمّاة لا بمؤشرات رقمية.
+
+    طبقة العرض كانت تفكّ الصف بـ`if c == 2: ... elif c == 6:` على ترتيب أعمدة
+    الاستعلام، فأي إضافة عمود أو إعادة ترتيب تنقل القيم إلى أعمدة أخرى **بلا
+    أي خطأ** — تُعرض «يدوي» مكان اللوحة ولا شيء يشتكي. الأسماء تنقل الانكسار
+    من زمن العرض إلى زمن التصريف (mypy).
+    """
+
+    id: int
+    video_filename: str
+    violation_type: str
+    start_ms: int
+    end_ms: int
+    license_plate: str
+    source: str
+    notes: str
 
 
 # ============================================
@@ -95,19 +122,33 @@ class DashboardService:
         return {str(r[0]): int(r[1]) for r in rows}
 
     def violations_by_hour(self) -> list[tuple[int, int]]:
-        """يُرجع (hour 0-23, count) باستخدام recorded_at من المقطع."""
+        """يُرجع (hour 0-23, count) بلحظة المخالفة الفعلية داخل المقطع."""
         rows = self._db.fetch_all(
-            "SELECT EXTRACT(hour FROM v.recorded_at)::INTEGER, COUNT(vi.id) "
+            f"SELECT EXTRACT(hour FROM {_VIOLATION_MOMENT})::INTEGER, COUNT(vi.id) "
             "FROM violations vi JOIN videos v ON vi.video_id = v.id "
             "WHERE v.recorded_at IS NOT NULL "
             "GROUP BY 1 ORDER BY 1"
         )
         return [(int(r[0]), int(r[1])) for r in rows]
 
+    def count_violations_without_time(self) -> int:
+        """عدد المخالفات المستثناة من الرسوم الزمنية (مقطعها بلا تاريخ تسجيل).
+
+        كل التجميعات الزمنية تشترط `recorded_at IS NOT NULL`، و`recorded_at` يأتي
+        من tags الفيديو التي كثيراً ما تكون غائبة (واتساب، إعادة ترميز، تنزيل من
+        سوشل ميديا). بلا هذا العدّ يرى المستخدم «لا توجد بيانات» في الخريطة
+        الحرارية وعنده مئات المخالفات، بلا أي تفسير.
+        """
+        row = self._db.fetch_one(
+            "SELECT COUNT(*) FROM violations vi JOIN videos v ON vi.video_id = v.id "
+            "WHERE v.recorded_at IS NULL"
+        )
+        return int(row[0]) if row else 0
+
     def violations_by_weekday(self) -> list[tuple[int, int]]:
         """يُرجع (weekday 0=Mon..6=Sun, count)."""
         rows = self._db.fetch_all(
-            "SELECT (EXTRACT(dow FROM v.recorded_at)::INTEGER + 6) % 7, COUNT(vi.id) "
+            f"SELECT (EXTRACT(dow FROM {_VIOLATION_MOMENT})::INTEGER + 6) % 7, COUNT(vi.id) "
             "FROM violations vi JOIN videos v ON vi.video_id = v.id "
             "WHERE v.recorded_at IS NOT NULL "
             "GROUP BY 1 ORDER BY 1"
@@ -117,8 +158,8 @@ class DashboardService:
     def violations_heatmap(self) -> dict[tuple[int, int], int]:
         """خريطة حرارية {(weekday, hour): count}."""
         rows = self._db.fetch_all(
-            "SELECT (EXTRACT(dow FROM v.recorded_at)::INTEGER + 6) % 7, "
-            "EXTRACT(hour FROM v.recorded_at)::INTEGER, COUNT(vi.id) "
+            f"SELECT (EXTRACT(dow FROM {_VIOLATION_MOMENT})::INTEGER + 6) % 7, "
+            f"EXTRACT(hour FROM {_VIOLATION_MOMENT})::INTEGER, COUNT(vi.id) "
             "FROM violations vi JOIN videos v ON vi.video_id = v.id "
             "WHERE v.recorded_at IS NOT NULL "
             "GROUP BY 1, 2"
@@ -128,7 +169,7 @@ class DashboardService:
     def violations_over_time(self) -> list[tuple[date, int]]:
         """عدد المخالفات لكل يوم."""
         rows = self._db.fetch_all(
-            "SELECT DATE(v.recorded_at), COUNT(vi.id) "
+            f"SELECT DATE({_VIOLATION_MOMENT}), COUNT(vi.id) "
             "FROM violations vi JOIN videos v ON vi.video_id = v.id "
             "WHERE v.recorded_at IS NOT NULL "
             "GROUP BY 1 ORDER BY 1"
@@ -249,14 +290,27 @@ class DashboardService:
         row = self._db.fetch_one(sql, tuple(params) if params else None)
         return int(row[0]) if row else 0
 
-    def list_violations_for_editing(self, *, limit: int = 500) -> list[tuple[Any, ...]]:
+    def list_violations_for_editing(self, *, limit: int = 500) -> list[EditableViolationRow]:
         """صفوف المخالفات لجدول التحرير في تبويب التحليل (مع المصدر والملاحظات)."""
-        return self._db.fetch_all(
+        rows = self._db.fetch_all(
             "SELECT vi.id, v.filename, vi.violation_type, vi.start_ms, vi.end_ms, "
             "COALESCE(vi.license_plate, ''), COALESCE(vi.source, 'auto'), COALESCE(vi.notes, '') "
             "FROM violations vi LEFT JOIN videos v ON v.id = vi.video_id "
             f"ORDER BY vi.id DESC LIMIT {int(limit)}"
         )
+        return [
+            EditableViolationRow(
+                id=int(r[0]),
+                video_filename=str(r[1]) if r[1] is not None else "—",
+                violation_type=str(r[2]),
+                start_ms=int(r[3] or 0),
+                end_ms=int(r[4] or 0),
+                license_plate=str(r[5]),
+                source=str(r[6]),
+                notes=str(r[7]),
+            )
+            for r in rows
+        ]
 
     def get_violation_for_edit(self, violation_id: int) -> dict[str, Any] | None:
         """الحقول القابلة للتعديل لمخالفة واحدة، أو None لو غير موجودة."""
@@ -404,4 +458,4 @@ class DashboardService:
         )
 
 
-__all__ = ["DashboardKPIs", "DashboardService", "ViolationRow"]
+__all__ = ["DashboardKPIs", "DashboardService", "EditableViolationRow", "ViolationRow"]

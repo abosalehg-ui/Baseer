@@ -30,6 +30,11 @@ from app.core.db import Database, get_database
 
 logger = logging.getLogger(__name__)
 
+# حدود المدخلات: لوحة سعودية لا تتجاوز 12 محرفاً بالمسافات، والملاحظة سطر شرح
+# لا مستند. بلا حدود يمكن حفظ ميغابايتات من النص في حقل VARCHAR.
+MAX_PLATE_LENGTH = 12
+MAX_NOTES_LENGTH = 2000
+
 
 @dataclass
 class ManualViolationData:
@@ -134,9 +139,11 @@ class ManualViolationDialog(QDialog):
         self._end_ms.setAccessibleName("نهاية المخالفة بالميلي ثانية")
         form.addRow("نهاية الوقت:", self._end_ms)
 
-        # لوحة السيارة
+        # لوحة السيارة — حد الطول يمنع حشو القاعدة بنص لا معنى له
         self._plate = QLineEdit(self)
         self._plate.setPlaceholderText("اختياري — مثل: أ ب ج 1234")
+        self._plate.setMaxLength(MAX_PLATE_LENGTH)
+        self._plate.setAccessibleName("رقم لوحة المركبة")
         form.addRow("لوحة السيارة:", self._plate)
 
         # رقم إطار الإثبات (اختياري)
@@ -146,11 +153,17 @@ class ManualViolationDialog(QDialog):
         self._evidence_frame.setSpecialValueText("غير محدد")
         form.addRow("رقم فريم الإثبات:", self._evidence_frame)
 
-        # ملاحظات
+        # ملاحظات — بلا حد كان يمكن حفظ ميغابايتات من النص في القاعدة
         self._notes = QPlainTextEdit(self)
         self._notes.setPlaceholderText("سبب المخالفة أو ملاحظات إضافية...")
         self._notes.setMaximumHeight(80)
+        self._notes.setAccessibleName("ملاحظات المخالفة")
+        self._notes_counter = QLabel("", self)
+        self._notes_counter.setProperty("role", "muted")
+        self._notes.textChanged.connect(self._on_notes_changed)
+        self._on_notes_changed()
         form.addRow("ملاحظات:", self._notes)
+        form.addRow("", self._notes_counter)
 
         root.addLayout(form)
 
@@ -164,6 +177,30 @@ class ManualViolationDialog(QDialog):
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        self._set_tab_order(buttons)
+
+    def _set_tab_order(self, buttons: QDialogButtonBox) -> None:
+        """ترتيب تنقّل لوحة المفاتيح صريح لا تابعاً لترتيب الإنشاء.
+
+        الترتيب الضمني يتبع ترتيب بناء الودجات، وهو يتفرّق هنا لأن صف «بداية
+        الوقت» يحوي تخطيطاً متداخلاً وصف الملاحظات يحوي عدّاداً — فنُثبّته صراحةً
+        بالترتيب المنطقي: المقطع ← النوع ← الأوقات ← اللوحة ← الفريم ← الملاحظات
+        ← الأزرار.
+        """
+        chain: list[QWidget] = [
+            self._video_combo,
+            self._type_combo,
+            self._start_ms,
+            self._end_ms,
+            self._plate,
+            self._evidence_frame,
+            self._notes,
+            buttons,
+        ]
+        # الإزاحة مقصودة (كل عنصر مع تاليه) فالطولان مختلفان عمداً
+        for first, second in zip(chain, chain[1:], strict=False):
+            self.setTabOrder(first, second)
+        self._video_combo.setFocus()
 
     def _populate_from_existing(self, data: dict[str, Any]) -> None:
         # المقطع
@@ -200,6 +237,20 @@ class ManualViolationDialog(QDialog):
             logger.exception("فشل حفظ المخالفة اليدوية")
             QMessageBox.critical(self, "فشل الحفظ", f"تعذّر الحفظ: {exc}")
 
+    def _on_notes_changed(self) -> None:
+        """يقصّ الملاحظات عند الحد ويُظهر العدّاد."""
+        text = self._notes.toPlainText()
+        if len(text) > MAX_NOTES_LENGTH:
+            cursor_position = self._notes.textCursor().position()
+            self._notes.blockSignals(True)
+            self._notes.setPlainText(text[:MAX_NOTES_LENGTH])
+            cursor = self._notes.textCursor()
+            cursor.setPosition(min(cursor_position, MAX_NOTES_LENGTH))
+            self._notes.setTextCursor(cursor)
+            self._notes.blockSignals(False)
+            text = self._notes.toPlainText()
+        self._notes_counter.setText(f"{len(text)} / {MAX_NOTES_LENGTH} محرف")
+
     def _validate(self) -> bool:
         if self._video_combo.currentData() is None:
             QMessageBox.warning(self, "بيانات ناقصة", "يجب اختيار مقطع.")
@@ -207,7 +258,38 @@ class ManualViolationDialog(QDialog):
         if self._end_ms.value() <= self._start_ms.value():
             QMessageBox.warning(self, "بيانات غير صحيحة", "نهاية الوقت يجب أن تكون بعد البداية.")
             return False
+        return self._validate_within_duration()
+
+    def _validate_within_duration(self) -> bool:
+        """يمنع وقتاً خارج مدة المقطع.
+
+        المدى كان ثابتاً (0 → 24 ساعة) بلا علم بالمقطع، فمخالفة عند الساعة
+        الثالثة على مقطع 30 ثانية تُقبَل وتُخزَّن — بيانات لا معنى لها ولا شيء
+        يمنعها.
+        """
+        duration_ms = self._duration_ms_for_selected_video()
+        if duration_ms is None:
+            return True
+        if self._end_ms.value() > duration_ms:
+            QMessageBox.warning(
+                self,
+                "وقت خارج المقطع",
+                f"مدة المقطع {duration_ms} ms — "
+                f"لا يمكن أن تنتهي المخالفة عند {self._end_ms.value()} ms.",
+            )
+            return False
         return True
+
+    def _duration_ms_for_selected_video(self) -> int | None:
+        """مدة المقطع المختار بالمللي ثانية، أو None لو غير معروفة."""
+        video_id = self._video_combo.currentData()
+        if video_id is None:
+            return None
+        row = self._db.fetch_one("SELECT duration_sec FROM videos WHERE id = ?", (int(video_id),))
+        if row is None or row[0] is None:
+            return None
+        duration = float(row[0])
+        return int(duration * 1000) if duration > 0 else None
 
     def collect(self) -> ManualViolationData:
         """يجمع البيانات الحالية للحوار."""
@@ -245,7 +327,8 @@ class ManualViolationDialog(QDialog):
         )
 
     def _update_violation(self) -> None:
-        assert self._existing is not None
+        if self._existing is None:  # pragma: no cover - لا يُستدعى إلا في وضع التعديل
+            raise RuntimeError("لا توجد مخالفة قائمة للتعديل")
         data, evidence_json, notes = self._payload()
         self._service.update_violation_as_manual(
             int(self._existing["id"]),

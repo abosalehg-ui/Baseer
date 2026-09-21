@@ -34,6 +34,33 @@ def file_hash(
     return digest.hexdigest()
 
 
+def full_file_hash(
+    filepath: Path | str,
+    *,
+    chunk_size: int = 1024 * 1024,
+    algorithm: str = "sha256",
+) -> str:
+    """يحسب hash **كامل** المحتوى — للتأكيد قبل أي إجراء لا رجعة فيه.
+
+    `file_hash` أعلاه بصمة جزئية سريعة (بداية + نهاية + حجم) تكفي كفلتر أوّلي،
+    لكنها قابلة للتصادم: مقطعان بنفس الحجم ونفس الترويسة والذيل (تصدير دفعة
+    واحدة من نفس الكاميرا، أو قصّ من نفس المنتصف) يعطيان نفس البصمة. الاعتماد
+    عليها لإسقاط ملف تلقائياً يعني رفض دليل مختلف بصمت — فنؤكّد بهذه قبل
+    الإسقاط، وتُحسب عند الاشتباه فقط فتبقى التكلفة محصورة.
+    """
+    path = Path(filepath)
+    if not path.exists():
+        raise FileNotFoundError(f"الملف غير موجود: {path}")
+    digest = hashlib.new(algorithm)
+    with path.open("rb") as fp:
+        while True:
+            block = fp.read(chunk_size)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def perceptual_hash_from_image_path(image_path: Path | str, hash_size: int = 16) -> str:
     """يحسب perceptual hash لصورة (يُستخدم على thumbnails)."""
     try:

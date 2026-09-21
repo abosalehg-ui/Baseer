@@ -91,10 +91,18 @@ class HighBeamDetector(BaseViolationDetector):
         for track in tracks:
             if track.class_name not in VEHICLE_CLASSES:
                 continue
+            # العيّنة **بالمسافة الزمنية** لا بشرط القابلية للقسمة: الشرط
+            # السابق (`frame_no % n == 0`) يعطي المعدّل المقصود عند
+            # `frame_stride=1` فقط. مع stride=3 تكون أرقام الإطارات مضاعفات 3،
+            # فـ`% 5` يُبقي مضاعفات 15 — سُدس المعدّل المطلوب وبتباعد غير
+            # منتظم. نأخذ الآن أول كشف يبعد `n` إطاراً أو أكثر عن آخر كشف
+            # مأخوذ، فيبقى المعدّل ثابتاً أياً كان الـstride.
+            next_eligible_frame: int | None = None
             for det in track.detections:
-                if det.frame_no % self._sample_every_n_frames != 0:
+                if next_eligible_frame is not None and det.frame_no < next_eligible_frame:
                     continue
                 boxes_per_frame.setdefault(det.frame_no, []).append((track.track_id, det.bbox))
+                next_eligible_frame = det.frame_no + self._sample_every_n_frames
 
         # 2) نعالج إطاراً واحداً في كل لحظة ثم نتخلّص منه.
         #    الاحتفاظ بكل الإطارات المسحوبة في الذاكرة (السلوك السابق) يعني

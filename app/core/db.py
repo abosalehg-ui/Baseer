@@ -11,7 +11,7 @@ from typing import Any
 
 import duckdb
 
-from app.config import AppSettings, get_settings
+from app.config import AppSettings, get_settings, restrict_permissions
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +198,8 @@ class Database:
         self._in_transaction = False
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = self._connect_with_wal_recovery()
+        # القاعدة تحوي بيانات شخصية (لوحات، أوقات، مواقع) — للمستخدم وحده
+        restrict_permissions(self._db_path)
 
     def _connect_with_wal_recovery(self) -> duckdb.DuckDBPyConnection:
         """يفتح اتصال DuckDB ويتعافى تلقائياً من WAL تالف من crash سابق.

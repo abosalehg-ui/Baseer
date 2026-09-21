@@ -163,7 +163,7 @@ QPushButton {{
     border: 1px solid {p.border};
     border-radius: {RADIUS // 2}px;
     padding: {SPACING_XS}px {SPACING_MD}px;
-    min-height: {MIN_TOUCH_TARGET - 10}px;
+    min-height: {MIN_TOUCH_TARGET}px;
 }}
 QPushButton:hover {{ background-color: {p.border}; }}
 QPushButton:pressed {{ background-color: {p.primary}; color: {p.on_primary}; }}

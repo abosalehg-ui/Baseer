@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from PyQt6.QtCore import QObject, QThread
@@ -47,6 +47,23 @@ class ThreadHandle:
             return bool(self.thread.wait(msecs))
         except RuntimeError:
             return True
+
+
+def cancel_and_wait(handles: Iterable[ThreadHandle], *, msecs: int = 5000) -> int:
+    """يطلب الإلغاء من كل عامل يعمل ثم ينتظره. يُرجع عدد من كان يعمل.
+
+    ضروري عند إغلاق التطبيق: `MainWindow.closeEvent` يُغلق اتصال القاعدة
+    المفرد، فإن بقي عامل يعمل فإنه يُنفّذ استعلامات على اتصال مُغلق داخل thread
+    ويُدمَّر الـQThread وهو يعمل (`QThread: Destroyed while thread is still
+    running`) — انهيار عند كل خروج أثناء استيراد أو استدلال أو تدريب.
+    """
+    running = [h for h in handles if h.is_running()]
+    for handle in running:
+        handle.cancel()
+    for handle in running:
+        if not handle.wait(msecs):
+            logger.warning("عامل لم ينتهِ خلال %d ms — نُغلق رغم ذلك", msecs)
+    return len(running)
 
 
 def run_worker(
@@ -98,4 +115,4 @@ def run_worker(
     return handle
 
 
-__all__ = ["ThreadHandle", "run_worker"]
+__all__ = ["ThreadHandle", "cancel_and_wait", "run_worker"]

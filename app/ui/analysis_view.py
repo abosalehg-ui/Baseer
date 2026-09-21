@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QImage
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -24,7 +24,10 @@ from app.constants import VIOLATION_ARABIC_NAMES, ViolationType
 from app.core.analyzer import AnalyzerService
 from app.core.dashboard import DashboardService
 from app.core.library import LibraryService
+from app.core.readiness import VideoReadiness
 from app.ui.dialogs import ManualViolationDialog
+from app.workers.extract_worker import ExtractReport, ExtractWorker
+from app.workers.runner import ThreadHandle, run_worker
 
 logger = logging.getLogger(__name__)
 
@@ -51,52 +54,26 @@ def _stretch_text_columns(table: QTableWidget, *, text_columns: tuple[int, ...])
         header.setSectionResizeMode(col, mode)
 
 
-class _ExtractWorker(QThread):
-    """يستخرج المخالفات لمجموعة مقاطع في background."""
+def _violation_type_label(value: str) -> str:
+    """الاسم العربي لنوع المخالفة، أو الرمز كما هو لو غير معروف."""
+    try:
+        return VIOLATION_ARABIC_NAMES[ViolationType(value)]
+    except (KeyError, ValueError):
+        return value
 
-    progress = pyqtSignal(int, int, int, int)  # current, total, video_id, count
-    finished_all = pyqtSignal(int, int, object)  # total, processed, failures
-    failed = pyqtSignal(str)
 
-    def __init__(self, video_ids: list[int], service: AnalyzerService) -> None:
-        super().__init__()
-        self._ids = video_ids
-        self._service = service
-        self._cancelled = False
-
-    def cancel(self) -> None:
-        self._cancelled = True
-
-    @property
-    def cancelled(self) -> bool:
-        return self._cancelled
-
-    def run(self) -> None:  # noqa: D401
-        try:
-            total = 0
-            processed = 0
-            # إخفاقات الكواشف تُجمَّع وتُعرض للمستخدم بدل ابتلاعها في السجل:
-            # «0 مخالفة» بلا سبب يُقرأ كتطبيق معطّل.
-            failures: list[str] = []
-            for i, vid in enumerate(self._ids, start=1):
-                if self._cancelled:
-                    break
-                try:
-                    count = self._service.extract_violations(vid)
-                except Exception as exc:  # noqa: BLE001
-                    logger.exception("فشل استخراج المخالفات للمقطع %d: %s", vid, exc)
-                    failures.append(f"المقطع #{vid}: {exc}")
-                    self.progress.emit(i, len(self._ids), vid, -1)
-                    continue
-                for failure in self._service.last_detector_failures:
-                    failures.append(f"المقطع #{vid} — {failure}")
-                total += count
-                processed += 1
-                self.progress.emit(i, len(self._ids), vid, count)
-            self.finished_all.emit(total, processed, failures)
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("فشل عامل استخراج المخالفات")
-            self.failed.emit(str(exc))
+def _readiness_item(readiness: VideoReadiness | None) -> QTableWidgetItem:
+    """خلية عمود «الجاهزية» مع tooltip يسمّي الكواشف المعطّلة وسببها."""
+    if readiness is None:  # صف حُذف بين الاستعلامين
+        return QTableWidgetItem("—")
+    item = QTableWidgetItem(readiness.summary)
+    blocked = readiness.blocked_detectors
+    item.setToolTip(
+        "كواشف معطّلة:\n• " + "\n• ".join(blocked)
+        if blocked
+        else "كل المتطلبات متوفّرة — لا كواشف معطّلة"
+    )
+    return item
 
 
 class AnalysisView(QWidget):
@@ -110,9 +87,13 @@ class AnalysisView(QWidget):
         # يجب ألا تحتوي SQL خاماً (راجع docs/architecture.md).
         self._library = LibraryService()
         self._violations = DashboardService()
-        self._worker: _ExtractWorker | None = None
+        self._extract: ThreadHandle | None = None
         self._build_ui()
         self.refresh()
+
+    def background_handles(self) -> list[ThreadHandle]:
+        """مقابض العمّال الجارية — يقرأها `MainWindow.closeEvent` قبل إغلاق القاعدة."""
+        return [self._extract] if self._extract is not None else []
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -229,19 +210,14 @@ class AnalysisView(QWidget):
     # ============================================
     def refresh(self) -> None:
         rows = self._library.video_summaries()
+        # استعلام مجمَّع واحد بدل خمس عمليات I/O لكل صف في الـmain thread:
+        # مكتبة 500 مقطع كانت تعني ~2500 استعلام + 500 stat عند كل تحديث.
+        readiness = self._service.readiness_bulk([int(r[0]) for r in rows])
         self._table.setRowCount(len(rows))
         for r, row in enumerate(rows):
             for c, val in enumerate(row):
                 self._table.setItem(r, c, QTableWidgetItem(str(val)))
-            readiness = self._service.readiness(int(row[0]))
-            item = QTableWidgetItem(readiness.summary)
-            blocked = readiness.blocked_detectors
-            item.setToolTip(
-                "كواشف معطّلة:\n• " + "\n• ".join(blocked)
-                if blocked
-                else "كل المتطلبات متوفّرة — لا كواشف معطّلة"
-            )
-            self._table.setItem(r, 5, item)
+            self._table.setItem(r, 5, _readiness_item(readiness.get(int(row[0]))))
         self._refresh_summary()
 
     def _refresh_summary(self) -> None:
@@ -250,17 +226,18 @@ class AnalysisView(QWidget):
         total = self._violations.count_violations()
         self._violations_table.setRowCount(len(rows))
         for r, row in enumerate(rows):
-            for c, val in enumerate(row):
-                # نترجم نوع المخالفة إلى عربي
-                display = val
-                if c == 2:
-                    try:
-                        display = VIOLATION_ARABIC_NAMES[ViolationType(str(val))]
-                    except (KeyError, ValueError):
-                        display = str(val)
-                elif c == 6:
-                    display = "يدوي" if str(val) == "manual" else "تلقائي"
-                self._violations_table.setItem(r, c, QTableWidgetItem(str(display)))
+            cells = (
+                str(row.id),
+                row.video_filename,
+                _violation_type_label(row.violation_type),
+                str(row.start_ms),
+                str(row.end_ms),
+                row.license_plate,
+                "يدوي" if row.source == "manual" else "تلقائي",
+                row.notes,
+            )
+            for c, text in enumerate(cells):
+                self._violations_table.setItem(r, c, QTableWidgetItem(text))
         # البتر الصامت عند 500 صف كان يوهم المستخدم أن هذا كل ما لديه
         if total > len(rows):
             self._violations_label.setText(
@@ -290,7 +267,7 @@ class AnalysisView(QWidget):
         self._start_extraction(ids)
 
     def _start_extraction(self, ids: list[int]) -> None:
-        if self._worker is not None and self._worker.isRunning():
+        if self._extract is not None and self._extract.is_running():
             QMessageBox.information(self, "العملية تعمل", "هناك عملية استخراج جارية.")
             return
         self._progress.setVisible(True)
@@ -301,17 +278,17 @@ class AnalysisView(QWidget):
         self._run_selected_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
 
-        worker = _ExtractWorker(ids, self._service)
-        worker.progress.connect(self._on_progress)
-        worker.finished_all.connect(self._on_finished)
-        worker.failed.connect(self._on_failed)
-        self._worker = worker
-        worker.start()
+        self._extract = run_worker(
+            ExtractWorker(ids, service=self._service),
+            parent=self,
+            on_finished=self._on_finished,
+            on_failed=self._on_failed,
+            signal_bindings={"progress": self._on_progress},
+        )
 
     def _on_stop_extraction(self) -> None:
         """يطلب إيقاف الاستخراج — يتوقف بعد المقطع الجاري."""
-        if self._worker is not None and self._worker.isRunning():
-            self._worker.cancel()
+        if self._extract is not None and self._extract.cancel():
             self._stop_btn.setEnabled(False)
             self._status.setText("جارٍ الإيقاف بعد المقطع الحالي...")
 
@@ -322,23 +299,24 @@ class AnalysisView(QWidget):
         else:
             self._status.setText(f"({current}/{total}) المقطع #{video_id}: ✗ فشل")
 
-    def _on_finished(self, total: int, processed: int, failures: object) -> None:
+    def _on_finished(self, report: object) -> None:
         self._progress.setVisible(False)
         self._reset_action_buttons()
-        cancelled = self._worker is not None and self._worker.cancelled
-        prefix = "أُوقف" if cancelled else "اكتمل"
-        failure_list = list(failures) if isinstance(failures, list) else []
-        status = f"{prefix} — {total} مخالفة من {processed} مقطع"
-        if failure_list:
-            status += f" • {len(failure_list)} إخفاق"
+        self._extract = None
+        if not isinstance(report, ExtractReport):  # pragma: no cover - حماية توقيع الإشارة
+            self.refresh()
+            return
+        prefix = "أُوقف" if report.cancelled else "اكتمل"
+        status = f"{prefix} — {report.total_violations} مخالفة من {report.processed} مقطع"
+        if report.failures:
+            status += f" • {len(report.failures)} إخفاق"
         self._status.setText(status)
-        self._worker = None
         self.refresh()
 
         # صفر مخالفة بلا تفسير هو أسوأ مخرَج ممكن — نعرض السبب المحتمل
-        if failure_list:
-            self._show_failures(failure_list)
-        elif total == 0 and processed > 0:
+        if report.failures:
+            self._show_failures(report.failures)
+        elif report.total_violations == 0 and report.processed > 0:
             self._explain_zero_violations()
 
     def _show_failures(self, failures: list[str]) -> None:
@@ -352,9 +330,10 @@ class AnalysisView(QWidget):
 
     def _explain_zero_violations(self) -> None:
         """يشرح لماذا لم تُستخرَج أي مخالفة بدل ترك المستخدم يخمّن."""
+        ids = [vid for vid, _name in self._library.video_names()]
         blocked: list[str] = []
-        for vid, _name in self._library.video_names():
-            blocked.extend(self._service.readiness(vid).blocked_detectors)
+        for readiness in self._service.readiness_bulk(ids).values():
+            blocked.extend(readiness.blocked_detectors)
         if not blocked:
             return
         unique = list(dict.fromkeys(blocked))[:8]
@@ -376,7 +355,7 @@ class AnalysisView(QWidget):
         self._reset_action_buttons()
         self._status.setText("فشل الاستخراج")
         QMessageBox.critical(self, "فشل", message)
-        self._worker = None
+        self._extract = None
 
     # ============================================
     # التدخل البشري — إضافة/تعديل/حذف يدوي

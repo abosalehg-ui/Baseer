@@ -159,7 +159,7 @@ python -m pytest --cov=app --cov-report=term
 python -m pytest tests/test_rules.py -v
 ```
 
-**337 اختباراً** تمر في ~20 ثانية بدون GPU ولا ultralytics، بتغطية **71%**:
+**391 اختباراً** تمر في ~11 ثانية بدون GPU ولا ultralytics، بتغطية **73%**:
 
 | الطبقة | التغطية |
 |--------|---------|
@@ -185,8 +185,9 @@ baseer/
 │   │   ├── trainer_view.py
 │   │   ├── analysis_view.py
 │   │   ├── dashboard_view.py
-│   │   ├── dialogs/           # ManualViolationDialog (إضافة/تعديل مخالفة يدوية)
-│   │   └── widgets/           # thumbnail_grid, video_player, stats_charts
+│   │   ├── dialogs/           # manual_violation, evidence, zone_editor,
+│   │   │                      # duplicates, recorded_at
+│   │   └── widgets/           # thumbnail_grid, video_player, stats_charts, frame_canvas
 │   │
 │   ├── core/                  # المنطق التطبيقي (لا يستورد PyQt6)
 │   │   ├── db.py              # DuckDB connection + 7 جداول + ترحيل source/manual_user
@@ -195,8 +196,12 @@ baseer/
 │   │   ├── dataset.py         # CVAT YOLO → YOLOv8 (70/20/10)
 │   │   ├── trainer.py         # YOLOv8 fine-tuning (mockable)
 │   │   ├── analyzer.py        # inference + ByteTrack + extract_violations
-│   │   ├── rules.py           # 6 كواشف أصلية + Base/Zone/Track
-│   │   ├── detectors/         # كواشف إضافية (lane_keeping, following_distance, high_beam)
+│   │   ├── rules.py           # pipeline الكواشف + إعادة تصدير
+│   │   ├── violations.py      # Base/Zone/Track + مساعدات مشتركة
+│   │   ├── detectors/         # 9 كواشف، كل واحد في ملف
+│   │   ├── duplicates.py      # تأكيد التكرار بـhash كامل + تجميع phash
+│   │   ├── readiness.py       # جاهزية المقاطع (نسخة مفردة ومجمَّعة)
+│   │   ├── model_integrity.py # مطابقة بصمة النموذج قبل كل تحميل
 │   │   ├── frame_sampler.py   # قارئ إطارات حسب الرقم (لـ HighBeam)
 │   │   ├── calibration.py     # meters_per_px + سرعة
 │   │   ├── ocr.py             # PaddleOCR + تطبيع لوحات سعودية
@@ -204,14 +209,17 @@ baseer/
 │   │   ├── dashboard.py       # KPIs + تجميعات للداشبورد
 │   │   └── exporter.py        # JSON / CSV / Excel / PDF عربي
 │   │
-│   ├── workers/               # كل عملية ثقيلة في QThread
+│   ├── workers/               # كل عملية ثقيلة في QThread (عبر runner.run_worker)
+│   │   ├── runner.py          # نمط موحّد + إلغاء وانتظار عند الخروج
 │   │   ├── import_worker.py
 │   │   ├── inference_worker.py
+│   │   ├── extract_worker.py
+│   │   ├── export_worker.py
 │   │   └── training_worker.py
 │   │
 │   ├── utils/
 │   │   ├── video_utils.py     # ffprobe + thumbnails + scene detect
-│   │   ├── hash_utils.py      # partial SHA256 + phash
+│   │   ├── hash_utils.py      # بصمة جزئية + بصمة كاملة + phash
 │   │   ├── arabic_utils.py    # تطبيع عربي شامل
 │   │   └── geometry.py        # bbox, polygon, IoU, intersection
 │   │
@@ -243,10 +251,14 @@ baseer/
 ├── docs/
 │   ├── baseer-plan.md         # الخطة الكاملة
 │   ├── architecture.md
-│   └── annotation_guide.md
+│   ├── annotation_guide.md
+│   ├── licensing.md           # AGPL وبدائله
+│   ├── build_installer.md
+│   ├── slim_installer.md
+│   └── reviews/               # مراجعات المستودع وخطط الإصلاح
 │
-├── tests/                     # 212 اختبار
-└── .github/workflows/ci.yml   # ruff + black + pytest على كل PR
+├── tests/                     # مجموعة الاختبارات (العدد في جدول «معايير الجودة»)
+└── .github/workflows/ci.yml   # ruff + black + check_structure + mypy + pytest + pip-audit
 ```
 
 ---
@@ -310,7 +322,7 @@ python scripts/export_study.py --format all --output data/exports
 
 | المعيار | الحالة |
 |--------|--------|
-| اختبارات وحدة | **337** نجاح (تغطية 71%) |
+| اختبارات وحدة | **391** نجاح (تغطية 73%) |
 | Ruff (lint) | نظيف 100% |
 | Black (format) | منسّق (الإصدار مثبَّت في CI ويُحدَّث عبر Dependabot) |
 | حدود حجم الملفات والدوالّ | ✅ **مفروضة في CI** عبر `scripts/check_structure.py` |
@@ -318,6 +330,8 @@ python scripts/export_study.py --format all --output data/exports
 | Core بدون PyQt | ✅ (`app/core/` لا يستورد من Qt) |
 | فحص الأنواع (mypy) | ✅ يعمل في CI على `app/` |
 | فحص ثغرات التبعيات | ✅ `pip-audit` في CI + Dependabot أسبوعي |
+| سلامة النماذج | ✅ بصمة مجاورة تُطابَق عند كل تحميل (`app/core/model_integrity.py`) |
+| تنقية مخرجات الجداول | ✅ تعطيل تقييم الصيغ في CSV/Excel (`exporter.sanitize_cell`) |
 | تباين الألوان WCAG AA | ✅ مُختبَر آلياً لكل تركيبة في `app/ui/theme.py` |
 
 ---

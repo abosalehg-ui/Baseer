@@ -17,6 +17,7 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -25,19 +26,13 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from app.config import get_settings
+from app.config import get_settings, is_default_anon_salt
 from app.constants import VIOLATION_ARABIC_NAMES, ReviewStatus, ViolationType
 from app.core.dashboard import DashboardKPIs, DashboardService
-from app.core.exporter import (
-    anonymize_violation_rows,
-    build_study,
-    export_csv,
-    export_excel,
-    export_json,
-    export_pdf,
-)
 from app.ui import theme
 from app.ui.widgets.stats_charts import make_bar_chart, make_heatmap, make_line_chart
+from app.workers.export_worker import ExportResult, ExportWorker
+from app.workers.runner import ThreadHandle, run_worker
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +53,8 @@ class DashboardView(QWidget):
         self._settings = get_settings()
         self._service = DashboardService()
         self._kpi_cards: list[QFrame] = []
+        self._export_buttons: list[QPushButton] = []
+        self._export: ThreadHandle | None = None
         self._build_ui()
         self.refresh()
 
@@ -88,22 +85,17 @@ class DashboardView(QWidget):
         bar = QHBoxLayout()
         bar.addWidget(QLabel("تصدير الدراسة:", self))
 
-        json_btn = QPushButton("JSON", self)
-        json_btn.setAccessibleName("تصدير الدراسة بصيغة JSON")
-        json_btn.clicked.connect(lambda: self._on_export("json"))
-        bar.addWidget(json_btn)
-
-        csv_btn = QPushButton("CSV", self)
-        csv_btn.clicked.connect(lambda: self._on_export("csv"))
-        bar.addWidget(csv_btn)
-
-        xlsx_btn = QPushButton("Excel", self)
-        xlsx_btn.clicked.connect(lambda: self._on_export("xlsx"))
-        bar.addWidget(xlsx_btn)
-
-        pdf_btn = QPushButton("PDF عربي", self)
-        pdf_btn.clicked.connect(lambda: self._on_export("pdf"))
-        bar.addWidget(pdf_btn)
+        for fmt, label, accessible in (
+            ("json", "JSON", "تصدير الدراسة بصيغة JSON"),
+            ("csv", "CSV", "تصدير المخالفات بصيغة CSV"),
+            ("xlsx", "Excel", "تصدير الدراسة بصيغة Excel"),
+            ("pdf", "PDF عربي", "تصدير تقرير PDF عربي"),
+        ):
+            button = QPushButton(label, self)
+            button.setAccessibleName(accessible)
+            button.clicked.connect(lambda _checked=False, f=fmt: self._on_export(f))
+            self._export_buttons.append(button)
+            bar.addWidget(button)
 
         # تجهيل اللوحات عند التصدير — الدراسة الإحصائية لا تحتاج أرقام لوحات،
         # وتصديرها يجعل الملف سجلاً شخصياً يربط مركبات محدَّدة بأوقات ومواقع.
@@ -117,9 +109,21 @@ class DashboardView(QWidget):
         self._anon_check.setAccessibleName("تفعيل تجهيل اللوحات عند التصدير")
         bar.addWidget(self._anon_check)
 
+        # تقدّم التصدير: العملية صارت في QThread، والمستخدم يحتاج دليلاً أنها تعمل
+        self._export_progress = QProgressBar(self)
+        self._export_progress.setVisible(False)
+        self._export_progress.setMaximumWidth(140)
+        self._export_progress.setAccessibleName("تقدّم التصدير")
+        bar.addWidget(self._export_progress)
+
+        self._export_status = QLabel("", self)
+        self._export_status.setProperty("role", "muted")
+        bar.addWidget(self._export_status)
+
         bar.addStretch()
 
         refresh_btn = QPushButton("تحديث", self)
+        refresh_btn.setAccessibleName("تحديث الداشبورد")
         refresh_btn.clicked.connect(self.refresh)
         bar.addWidget(refresh_btn)
 
@@ -143,7 +147,11 @@ class DashboardView(QWidget):
         self._filter_type.addItem("الكل", None)
         for vt in ViolationType:
             self._filter_type.addItem(VIOLATION_ARABIC_NAMES[vt], vt.value)
-        self._filter_type.currentIndexChanged.connect(self.refresh)
+        # الفلاتر تُحدّث **الجدول وحده**: كانت موصولة بـ`refresh()` فيُعاد حساب
+        # `violations_by_type` و`by_hour` و`violations_heatmap` (JOIN تجميعي)
+        # وتُحذف وتُبنى ثلاث ودجات pyqtgraph عند كل تغيير فلتر — والرسوم لا
+        # تستقبل الفلاتر أصلاً.
+        self._filter_type.currentIndexChanged.connect(self._refresh_violations)
         filters.addWidget(self._filter_type)
 
         filters.addWidget(QLabel("الحالة:", panel))
@@ -151,7 +159,7 @@ class DashboardView(QWidget):
         self._filter_review.addItem("الكل", None)
         for rs in ReviewStatus:
             self._filter_review.addItem(_review_status_label(rs.value), rs.value)
-        self._filter_review.currentIndexChanged.connect(self.refresh)
+        self._filter_review.currentIndexChanged.connect(self._refresh_violations)
         filters.addWidget(self._filter_review)
         filters.addStretch()
         layout.addLayout(filters)
@@ -279,6 +287,19 @@ class DashboardView(QWidget):
             make_line_chart("المخالفات حسب ساعة اليوم", line_points, self._charts_container), 0, 1
         )
 
+        # المخالفات المستثناة من الرسوم الزمنية تُعلَن صراحةً: «لا توجد بيانات»
+        # وعند المستخدم مئات المخالفات هو أسوأ مخرَج ممكن.
+        excluded = self._service.count_violations_without_time()
+        if excluded:
+            note = QLabel(
+                f"⚠️ {excluded} مخالفة مستثناة من الرسوم الزمنية: مقطعها بلا تاريخ تسجيل. "
+                "عيّنه من تبويب المكتبة («تاريخ التسجيل») لتدخل في التحليل الزمني.",
+                self._charts_container,
+            )
+            note.setWordWrap(True)
+            note.setProperty("role", "hint")
+            self._charts_layout.addWidget(note, 2, 0, 1, 2)
+
         heatmap_data = self._service.violations_heatmap()
         if heatmap_data:
             matrix = [[heatmap_data.get((wd, h), 0) for h in range(24)] for wd in range(7)]
@@ -340,8 +361,11 @@ class DashboardView(QWidget):
         ):
             btn = QPushButton(label, container)
             btn.setStyleSheet(theme.action_button_style(bg, fg))
-            btn.setMinimumWidth(theme.MIN_TOUCH_TARGET)
-            btn.setMinimumHeight(theme.MIN_TOUCH_TARGET - 6)
+            # الهدف المريح (44px) لا الحد الأدنى: أزرار برمز واحد في صف جدول
+            # ضيّق هي أصعب ما يُنقر في التطبيق، و`COMFORTABLE_TOUCH_TARGET` كان
+            # معرَّفاً في `theme.py` ولا يستخدمه أحد.
+            btn.setMinimumWidth(theme.COMFORTABLE_TOUCH_TARGET)
+            btn.setMinimumHeight(theme.COMFORTABLE_TOUCH_TARGET)
             btn.setAccessibleName(f"{name} رقم {violation_id}")
             btn.setToolTip(name)
             btn.clicked.connect(
@@ -352,8 +376,8 @@ class DashboardView(QWidget):
         evidence_btn = QPushButton("🎬", container)
         evidence_btn.setToolTip("عرض الأدلة (إطارات + مشغّل عند وقت المخالفة)")
         evidence_btn.setAccessibleName(f"عرض أدلة المخالفة رقم {violation_id}")
-        evidence_btn.setMinimumWidth(theme.MIN_TOUCH_TARGET)
-        evidence_btn.setMinimumHeight(theme.MIN_TOUCH_TARGET - 6)
+        evidence_btn.setMinimumWidth(theme.COMFORTABLE_TOUCH_TARGET)
+        evidence_btn.setMinimumHeight(theme.COMFORTABLE_TOUCH_TARGET)
         evidence_btn.clicked.connect(
             lambda _checked=False, vid=violation_id: self._show_evidence(vid)
         )
@@ -378,7 +402,34 @@ class DashboardView(QWidget):
     # ============================================
     # التصدير
     # ============================================
+    def background_handles(self) -> list[ThreadHandle]:
+        """مقابض العمّال الجارية — يقرأها `MainWindow.closeEvent` قبل إغلاق القاعدة."""
+        return [self._export] if self._export is not None else []
+
     def _on_export(self, fmt: str) -> None:
+        if self._export is not None and self._export.is_running():
+            QMessageBox.information(self, "تصدير جارٍ", "انتظر انتهاء التصدير الحالي.")
+            return
+        out_path = self._ask_export_path(fmt)
+        if out_path is None:
+            return
+        anonymize = self._anon_check.isChecked()
+        if anonymize and not self._confirm_salt_is_private():
+            return
+
+        self._export_progress.setVisible(True)
+        self._export_progress.setRange(0, 0)  # غير محدَّد: لا تقدّم قابل للقياس
+        self._export_status.setText("بدء التصدير...")
+        self._set_export_enabled(False)
+        self._export = run_worker(
+            ExportWorker(fmt, out_path, anonymize=anonymize, service=self._service),
+            parent=self,
+            on_finished=self._on_export_finished,
+            on_failed=self._on_export_failed,
+            signal_bindings={"progress": self._export_status.setText},
+        )
+
+    def _ask_export_path(self, fmt: str) -> Path | None:
         export_dir = self._settings.data_dir / "exports"
         export_dir.mkdir(parents=True, exist_ok=True)
         filters_map = {
@@ -391,33 +442,53 @@ class DashboardView(QWidget):
         path_str, _ = QFileDialog.getSaveFileName(
             self, "حفظ التصدير", str(export_dir / default), filt
         )
-        if not path_str:
-            return
-        out_path = Path(path_str)
+        return Path(path_str) if path_str else None
 
-        anonymize = self._anon_check.isChecked()
-        try:
-            study = build_study(self._service, anonymize=anonymize)
-            violations = self._service.list_violations()
-            if anonymize:
-                violations = anonymize_violation_rows(violations)
-            if fmt == "json":
-                export_json(study, out_path)
-            elif fmt == "csv":
-                export_csv(violations, out_path)
-            elif fmt == "xlsx":
-                export_excel(study, violations, out_path)
-            elif fmt == "pdf":
-                export_pdf(study, violations, out_path)
-            self._service.record_export_entry(
-                study_name=out_path.stem, fmt=fmt, output_path=out_path
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("فشل التصدير")
-            QMessageBox.critical(self, "فشل التصدير", str(exc))
-            return
+    def _confirm_salt_is_private(self) -> bool:
+        """يمنع تصديراً «مجهّلاً» بملح معروف بلا علم المستخدم.
 
-        QMessageBox.information(self, "تم التصدير", f"حُفظ في:\n{out_path}")
+        رمز اللوحة = HMAC(ملح، لوحة). الملح الافتراضي منشور في المستودع، وفضاء
+        اللوحة السعودية ≈10⁷ — فمن يحصل على الملف يعكس كل الرموز في ثوانٍ.
+        التطبيق يولّد ملحاً خاصاً عند أول تشغيل، فهذا التحذير لا يظهر إلا لمن
+        أعاد القيمة الافتراضية يدوياً في `.env`.
+        """
+        if not is_default_anon_salt(self._settings):
+            return True
+        answer = QMessageBox.warning(
+            self,
+            "التجهيل بملح افتراضي",
+            "<b>ملح التجهيل هو القيمة الافتراضية المنشورة.</b><br><br>"
+            "رموز اللوحات في هذا الملف <b>قابلة للعكس</b> لمن يعرف الملح — "
+            "وهو منشور في المستودع.<br><br>"
+            "عيّن <code>BASEER_ANON_SALT</code> بقيمة عشوائية في <code>.env</code> "
+            "وأعد تشغيل التطبيق، أو تابع إن كان الملف لك وحدك.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _set_export_enabled(self, enabled: bool) -> None:
+        for button in self._export_buttons:
+            button.setEnabled(enabled)
+
+    def _on_export_finished(self, result: object) -> None:
+        self._export_progress.setVisible(False)
+        self._set_export_enabled(True)
+        self._export = None
+        if not isinstance(result, ExportResult):  # pragma: no cover - حماية توقيع الإشارة
+            return
+        self._export_status.setText(f"حُفظ {result.output_path.name}")
+        QMessageBox.information(
+            self,
+            "تم التصدير",
+            f"حُفظ في:\n{result.output_path}\n\n{result.violations} مخالفة",
+        )
+
+    def _on_export_failed(self, message: str) -> None:
+        self._export_progress.setVisible(False)
+        self._set_export_enabled(True)
+        self._export = None
+        self._export_status.setText("فشل التصدير")
+        QMessageBox.critical(self, "فشل التصدير", message)
 
 
 def _safe_vt(value: str) -> bool:
