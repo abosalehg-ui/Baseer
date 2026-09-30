@@ -13,6 +13,19 @@ updates:
     open-pull-requests-limit: 5
     labels:
       - dependencies
+    # منع الترقيات الرئيسية للمكتبات التي تكسر الكود فعلياً — CI لا يثبّتها
+    # (غير موجودة في requirements-ci.lock) فيبقى أخضر مع PR يكسر التطبيق.
+    # - PaddleOCR 3.x أزال use_angle_cls / use_gpu / show_log و cls= التي
+    #   يستخدمها app/core/ocr.py، ويتطلّب PaddlePaddle 3.x.
+    # - OpenCV 5 ترقية رئيسية غير مُختبَرة في مسار الفيديو.
+    # الترقيات الصغرى والتصحيحية (وتنبيهات الأمان) تبقى مفعّلة.
+    ignore:
+      - dependency-name: paddleocr
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "paddlepaddle*"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: opencv-python
+        update-types: ["version-update:semver-major"]
     groups:
       # ترقيات أدوات التطوير مجمّعة في PR واحد (منخفضة المخاطر)
       dev-tools:
