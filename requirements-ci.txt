@@ -18,7 +18,7 @@ pydantic-settings>=2.4.0,<3
 
 # الواجهة
 PyQt6>=6.11.0,<7
-pyqtgraph>=0.13.0,<0.14
+pyqtgraph>=0.14.0,<0.15
 
 # التصدير — تُشغَّل اختبارات Excel/PDF فعلياً بدل تخطّيها في CI
 openpyxl>=3.1.0,<4
