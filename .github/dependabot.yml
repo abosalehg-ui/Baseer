@@ -4,12 +4,14 @@ version: 2
 # السبب: أدوات اللينت كانت مثبَّتة على إصدار واحد في CI بلا آلية ترقية، فينحرف
 # الكود صامتاً عن الإصدار الحالي؛ ومكتبات المعالجة (torch/opencv/paddle) لها
 # تاريخ ثغرات فك تشفير نشط بلا أي مراقبة.
+# التحديثات مجمّعة شهريًا: PR واحد لكل مجموعة بدل PR لكل مكتبة، فلا تتراكم
+# وتتقادم. المجموعات الخاصة أدناه تُطابَق أولًا، وما تبقّى يقع في المجموعتين
+# العامتين (صغرى/تصحيحية، ورئيسية منفصلة لأنها وحدها قد تكسر البناء).
 updates:
   - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: weekly
-      day: monday
+      interval: monthly
     open-pull-requests-limit: 5
     labels:
       - dependencies
@@ -44,6 +46,13 @@ updates:
           - opencv-python
           - "paddle*"
           - numpy
+      # كل ما لم تلتقطه المجموعتان السابقتان
+      minor-and-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      major:
+        patterns: ["*"]
+        update-types: ["major"]
 
   - package-ecosystem: github-actions
     directory: "/"
@@ -51,3 +60,6 @@ updates:
       interval: monthly
     labels:
       - dependencies
+    groups:
+      github-actions:
+        patterns: ["*"]
