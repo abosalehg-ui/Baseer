@@ -40,7 +40,7 @@ pyqtgraph>=0.13.0,<0.14
 ffmpeg-python>=0.2.0,<0.3
 scenedetect>=0.7.1,<0.8
 Pillow>=12.3.0,<13
-imagehash>=4.3.0,<5
+imagehash>=4.3.2,<5
 
 # النص العربي
 arabic-reshaper>=3.0.1,<4

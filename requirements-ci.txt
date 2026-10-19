@@ -7,7 +7,7 @@ duckdb>=1.1.0,<2
 
 # معالجة الفيديو والصور
 Pillow>=12.3.0,<13
-imagehash>=4.3.0,<5
+imagehash>=4.3.2,<5
 ffmpeg-python>=0.2.0,<0.3
 scenedetect>=0.7.1,<0.8
 
